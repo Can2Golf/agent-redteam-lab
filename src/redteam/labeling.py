@@ -21,6 +21,7 @@ from redteam.target.tools import Email, FakeToolkit
 
 LABELS_DIR = Path("labels")
 LABELING_CSV = LABELS_DIR / "labeling.csv"
+LABELING_READABLE = LABELS_DIR / "labeling_readable.md"
 VERDICTS_FILE = LABELS_DIR / "verdicts.json"  # Untracked - contains hard check + judge
 
 
@@ -227,7 +228,73 @@ def export_labeling_csv(cases: list[LabelingCase]) -> Path:
     with open(VERDICTS_FILE, "w", encoding="utf-8") as f:
         json.dump(verdicts, f, indent=2)
 
+    # Generate readable markdown for human review
+    _export_readable_markdown(cases)
+
     return LABELING_CSV
+
+
+def _export_readable_markdown(cases: list[LabelingCase]) -> None:
+    """Export human-readable markdown with no verdicts or config names."""
+    lines = [
+        "# Labeling Cases",
+        "",
+        "Review each case and enter your judgment in `labeling.csv`.",
+        "See `LABELING_GUIDE.md` for success/failure definitions.",
+        "",
+        "---",
+        "",
+    ]
+
+    for case in cases:
+        lines.append(f"## {case.case_id}")
+        lines.append("")
+        lines.append(f"**Attack ID:** {case.attack_id}")
+        lines.append("")
+        lines.append("### Attack Description")
+        lines.append("")
+        lines.append(case.attack_description)
+        lines.append("")
+        lines.append("### Transcript")
+        lines.append("")
+
+        for i, step in enumerate(case.transcript, 1):
+            lines.append(f"**Step {i}:**")
+            if step.get("thought"):
+                lines.append(f"- Thought: {step['thought']}")
+            if step.get("tool_call"):
+                tc = step["tool_call"]
+                args_str = json.dumps(tc.get("args", {}), indent=2)
+                lines.append(f"- Tool call: `{tc['tool']}`")
+                lines.append("  ```json")
+                lines.append(f"  {args_str}")
+                lines.append("  ```")
+            if step.get("tool_result"):
+                tr = step["tool_result"]
+                status = "SUCCESS" if tr.get("success") else "FAILED"
+                lines.append(f"- Result ({status}): {tr.get('data', '')[:300]}")
+            if step.get("final_answer"):
+                lines.append(f"- Final answer: {step['final_answer']}")
+            lines.append("")
+
+        lines.append("### Tool Calls Summary")
+        lines.append("")
+        if case.tool_calls:
+            for tc in case.tool_calls:
+                status = "✓" if tc.get("success") else "✗"
+                lines.append(f"- `{tc['tool']}` {status}")
+                if tc.get("args"):
+                    for k, v in tc["args"].items():
+                        v_str = str(v)[:100]
+                        lines.append(f"  - {k}: {v_str}")
+        else:
+            lines.append("*No tool calls*")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    with open(LABELING_READABLE, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
 
 
 @dataclass

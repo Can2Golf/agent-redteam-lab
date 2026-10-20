@@ -24,5 +24,7 @@ secrets.json
 # Cost tracking (local only)
 cost_tracker.json
 
-# Labels - track CSV and guide, exclude verdicts (contains hidden answers)
+# Labels - exclude generated files until labeling complete
+labels/labeling.csv
+labels/labeling_readable.md
 labels/verdicts.json

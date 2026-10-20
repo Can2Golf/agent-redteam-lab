@@ -219,19 +219,4 @@ class RuleBasedModel(ModelProvider):
         return None
 
 
-class AnthropicProvider(ModelProvider):
-    """
-    Anthropic Claude API provider. NOT IMPLEMENTED IN STAGE 1.
-
-    Stage 2 will implement this with real API calls.
-    Requires ANTHROPIC_API_KEY environment variable.
-    """
-
-    def __init__(self, model: str = "claude-sonnet-4-20250514") -> None:
-        self.model = model
-
-    def generate(self, system: str, messages: list[dict[str, str]]) -> ModelResponse:
-        raise NotImplementedError(
-            "AnthropicProvider is a Stage 2 feature. "
-            "Stage 1 uses RuleBasedModel for deterministic testing."
-        )
+# Real AnthropicProvider is in anthropic_provider.py (Stage 2)

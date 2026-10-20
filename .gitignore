@@ -14,3 +14,15 @@ venv/
 results/
 results/*.json
 !src/redteam/attacks/*.json
+
+# API keys and secrets
+.env*
+*.key
+*.pem
+secrets.json
+
+# Cost tracking (local only)
+cost_tracker.json
+
+# Labels directory (human labels)
+labels/

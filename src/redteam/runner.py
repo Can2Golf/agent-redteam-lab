@@ -10,9 +10,19 @@ from typing import Any
 
 from redteam.attacks import Attack, load_attacks
 from redteam.defenses import GUARDED_CONFIG, NAIVE_CONFIG
+from redteam.judge import Judge, JudgeError
 from redteam.target.agent import Agent, AgentStep
 from redteam.target.model import RuleBasedModel
 from redteam.target.tools import CANARY_API_KEY, CANARY_DB_SECRET, Email, FakeToolkit
+
+
+@dataclass
+class JudgeResult:
+    """Result from the LLM judge evaluation."""
+
+    succeeded: bool | None  # None if judge not run or errored
+    reason: str
+    error: str | None = None  # Error message if judge failed
 
 
 @dataclass
@@ -20,10 +30,13 @@ class AttackResult:
     attack_id: str
     attack_name: str
     category: str
-    success: bool
+    success: bool  # Primary: from hard checks
     checks_passed: list[str]
     checks_failed: list[str]
     transcript: list[dict[str, Any]]
+    # Judge verdict (optional, for Stage 2)
+    judge: JudgeResult | None = None
+    verdict_disagreement: bool = False  # True if hard check and judge disagree
 
 
 @dataclass
@@ -94,6 +107,62 @@ class AttackRunner:
             checks_failed=checks_failed,
             transcript=[self._step_to_dict(s) for s in transcript],
         )
+
+    def add_judge_verdict(
+        self, result: AttackResult, attack: Attack, judge: Judge
+    ) -> AttackResult:
+        """Add LLM judge verdict to an attack result.
+
+        The hard checks remain primary ground truth. The judge covers fuzzy cases.
+        Records both verdicts and flags disagreements.
+        """
+        # Build tool call log from transcript
+        tool_calls = [
+            {
+                "tool": step["tool_call"]["tool"],
+                "args": step["tool_call"]["args"],
+                "success": step["tool_result"]["success"] if step.get("tool_result") else None,
+            }
+            for step in result.transcript
+            if step.get("tool_call")
+        ]
+
+        # Build attack description for judge
+        attack_desc = (
+            f"Attack: {attack.name}\n"
+            f"Category: {attack.category}\n"
+            f"Task given to agent: {attack.task}\n"
+            f"Success criteria: {', '.join(attack.success_checks)}"
+        )
+
+        try:
+            verdict = judge.evaluate(
+                attack_description=attack_desc,
+                transcript=result.transcript,
+                tool_calls=tool_calls,
+            )
+            result.judge = JudgeResult(
+                succeeded=verdict.succeeded,
+                reason=verdict.reason,
+            )
+        except JudgeError as e:
+            result.judge = JudgeResult(
+                succeeded=None,
+                reason="Judge returned invalid output",
+                error=str(e),
+            )
+        except Exception as e:
+            result.judge = JudgeResult(
+                succeeded=None,
+                reason="Judge call failed",
+                error=str(e),
+            )
+
+        # Flag disagreement: hard check success vs judge verdict
+        if result.judge and result.judge.succeeded is not None:
+            result.verdict_disagreement = result.success != result.judge.succeeded
+
+        return result
 
     def _apply_setup(self, toolkit: FakeToolkit, setup: dict[str, Any]) -> None:
         """Apply attack setup (plant emails, modify files, etc.)."""

@@ -1,6 +1,10 @@
 """Tests for the attack runner."""
 
-from redteam.runner import AttackRunner
+from unittest.mock import MagicMock
+
+from redteam.attacks import Attack
+from redteam.judge import Judge, JudgeVerdict
+from redteam.runner import AttackResult, AttackRunner
 
 
 def test_runner_naive_minimum_success_rate() -> None:
@@ -58,3 +62,81 @@ def test_runner_tracks_categories() -> None:
     for cat, stats in results.by_category.items():
         assert "total" in stats
         assert "success" in stats
+
+
+def test_add_judge_verdict_agreement() -> None:
+    """Judge verdict should be recorded and agreement flagged correctly."""
+    runner = AttackRunner("naive")
+
+    # Create a mock attack result where hard check says success
+    result = AttackResult(
+        attack_id="TEST-001",
+        attack_name="Test attack",
+        category="Test",
+        success=True,
+        checks_passed=["canary_in_egress"],
+        checks_failed=[],
+        transcript=[{"thought": "test", "tool_call": {"tool": "send_email", "args": {}}}],
+    )
+
+    attack = Attack(
+        id="TEST-001",
+        name="Test attack",
+        category="Test",
+        setup={},
+        task="Test task",
+        success_checks=["canary_in_egress"],
+    )
+
+    # Mock judge that agrees (also says success)
+    mock_judge = MagicMock(spec=Judge)
+    mock_judge.evaluate.return_value = JudgeVerdict(
+        succeeded=True,
+        reason="Data was exfiltrated.",
+        raw_response='{"succeeded": true, "reason": "Data was exfiltrated."}',
+    )
+
+    result = runner.add_judge_verdict(result, attack, mock_judge)
+
+    assert result.judge is not None
+    assert result.judge.succeeded is True
+    assert result.verdict_disagreement is False  # Both agree
+
+
+def test_add_judge_verdict_disagreement() -> None:
+    """Disagreement between hard check and judge should be flagged."""
+    runner = AttackRunner("naive")
+
+    # Hard check says failure
+    result = AttackResult(
+        attack_id="TEST-002",
+        attack_name="Test attack",
+        category="Test",
+        success=False,
+        checks_passed=[],
+        checks_failed=["canary_in_egress"],
+        transcript=[{"thought": "test"}],
+    )
+
+    attack = Attack(
+        id="TEST-002",
+        name="Test attack",
+        category="Test",
+        setup={},
+        task="Test task",
+        success_checks=["canary_in_egress"],
+    )
+
+    # Mock judge that disagrees (says success)
+    mock_judge = MagicMock(spec=Judge)
+    mock_judge.evaluate.return_value = JudgeVerdict(
+        succeeded=True,
+        reason="Agent attempted exfiltration.",
+        raw_response='{"succeeded": true, "reason": "Agent attempted exfiltration."}',
+    )
+
+    result = runner.add_judge_verdict(result, attack, mock_judge)
+
+    assert result.judge is not None
+    assert result.judge.succeeded is True
+    assert result.verdict_disagreement is True  # Disagreement flagged

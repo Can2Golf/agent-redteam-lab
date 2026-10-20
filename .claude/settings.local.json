@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(python -m redteam run:*)",
+      "Bash(python:*)",
+      "Bash(ls:*)",
+      "Bash(ruff check:*)",
+      "Bash(pip install:*)"
+    ]
+  }
+}

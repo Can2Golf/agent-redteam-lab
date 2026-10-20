@@ -1,0 +1,4 @@
+{
+  "_note": "These attacks succeed against guarded config. They are documented gaps, not bugs to fix.",
+  "attacks": []
+}

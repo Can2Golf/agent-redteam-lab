@@ -145,7 +145,7 @@ class TestCostTracking:
         tracker = CostTracker(_file_path=tracker_file)
 
         client = create_mock_client(MockResponse(usage=MockUsage(input_tokens=500, output_tokens=100)))
-        config = ProviderConfig(model="claude-3-5-haiku-20241022", dry_run=False)
+        config = ProviderConfig(model="claude-haiku-5-5", dry_run=False)
 
         with patch("redteam.target.anthropic_provider.get_tracker", return_value=tracker):
             provider = AnthropicProvider(config=config, client=client)
@@ -161,7 +161,7 @@ class TestCostTracking:
         # Pre-exhaust budget
         tracker.usage.append(
             __import__("redteam.cost", fromlist=["TokenUsage"]).TokenUsage(
-                model="claude-3-5-haiku-20241022",
+                model="claude-haiku-5-5",
                 input_tokens=1_000_000,
                 output_tokens=1_000_000,
             )
@@ -191,11 +191,11 @@ class TestDryRun:
         assert "[DRY RUN]" in response.final_answer
 
     def test_estimate_run(self) -> None:
-        config = ProviderConfig(model="claude-3-5-haiku-20241022")
+        config = ProviderConfig(model="claude-haiku-5-5")
         provider = AnthropicProvider(config=config)
         result = provider.estimate_run(num_attacks=10, turns_per_attack=5)
         assert result.estimated_cost_usd > 0
-        assert result.model == "claude-3-5-haiku-20241022"
+        assert result.model == "claude-haiku-5-5"
 
 
 class TestSystemPrompts:

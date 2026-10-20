@@ -136,12 +136,21 @@ class AnthropicProvider(ModelProvider):
 
     def generate(self, system: str, messages: list[dict[str, str]]) -> ModelResponse:
         """Generate a response using the Anthropic Messages API."""
-        # Check budget before making a call
-        self._tracker.check_budget()
-
-        # Build API messages
+        # Build API messages first to estimate input tokens
         api_messages = self._build_messages(messages)
         system_prompt = GUARDED_SYSTEM_PROMPT if self.guarded else NAIVE_SYSTEM_PROMPT
+
+        # Estimate input tokens (rough: ~4 chars per token)
+        text = system_prompt + " ".join(str(m) for m in api_messages)
+        est_input_tokens = len(text) // 4
+
+        # Check budget BEFORE call using worst-case cost
+        # Worst case: estimated input + max possible output tokens
+        self._tracker.check_budget_for_call(
+            model=self.config.model,
+            est_input_tokens=est_input_tokens,
+            max_output_tokens=MAX_TOKENS_PER_RESPONSE,
+        )
 
         if self.config.dry_run:
             return self._dry_run_response(system_prompt, api_messages)

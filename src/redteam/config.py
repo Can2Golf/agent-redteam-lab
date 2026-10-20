@@ -6,20 +6,23 @@ import os
 from dataclasses import dataclass
 
 # Model IDs - configurable via environment
-TARGET_MODEL = os.environ.get("REDTEAM_TARGET_MODEL", "claude-3-5-haiku-20241022")
-JUDGE_MODEL = os.environ.get("REDTEAM_JUDGE_MODEL", "claude-sonnet-4-20250514")
+# Defaults: cheapest Haiku as target, Sonnet as judge
+TARGET_MODEL = os.environ.get("REDTEAM_TARGET_MODEL", "claude-haiku-5-5")
+JUDGE_MODEL = os.environ.get("REDTEAM_JUDGE_MODEL", "claude-sonnet-5-5")
 
-# Pricing per million tokens (as of 2025)
-# https://www.anthropic.com/pricing
+# Pricing per million tokens
+# Source: https://platform.claude.com/docs/en/about-claude/pricing (Oct 2026)
 PRICING: dict[str, dict[str, float]] = {
     # Haiku class
-    "claude-3-5-haiku-20241022": {"input": 0.80, "output": 4.00},
-    "claude-3-haiku-20240307": {"input": 0.25, "output": 1.25},
+    "claude-haiku-5-5": {"input": 0.10, "output": 0.50},  # For prompts ≤100K
+    "claude-haiku-4-5": {"input": 1.00, "output": 5.00},
     # Sonnet class
-    "claude-sonnet-4-20250514": {"input": 3.00, "output": 15.00},
-    "claude-3-5-sonnet-20241022": {"input": 3.00, "output": 15.00},
+    "claude-sonnet-5-5": {"input": 2.00, "output": 10.00},
+    "claude-sonnet-5": {"input": 2.00, "output": 10.00},
+    "claude-sonnet-4-6": {"input": 3.00, "output": 15.00},
     # Opus class
-    "claude-opus-4-20250514": {"input": 15.00, "output": 75.00},
+    "claude-opus-5-5": {"input": 4.00, "output": 20.00},
+    "claude-opus-5": {"input": 5.00, "output": 25.00},
 }
 
 # Budget cap in USD

@@ -66,6 +66,19 @@ class CostTracker:
         if self.total_cost >= self.cap_usd:
             raise BudgetExceededError(self.total_cost, self.cap_usd)
 
+    def check_budget_for_call(
+        self, model: str, est_input_tokens: int, max_output_tokens: int
+    ) -> None:
+        """Check if budget allows a call with worst-case cost.
+
+        Raises BudgetExceededError if total + worst-case cost exceeds cap.
+        This prevents any single call from pushing the total past the cap.
+        """
+        worst_case_cost = self.estimate_cost(model, est_input_tokens, max_output_tokens)
+        projected_total = self.total_cost + worst_case_cost
+        if projected_total > self.cap_usd:
+            raise BudgetExceededError(projected_total, self.cap_usd)
+
     def record(self, model: str, input_tokens: int, output_tokens: int) -> TokenUsage:
         """Record token usage from an API call."""
         usage = TokenUsage(model=model, input_tokens=input_tokens, output_tokens=output_tokens)

@@ -50,10 +50,13 @@ class TestExportLabelingCSV:
 
     def test_exports_blind_csv(self, sample_cases: list[LabelingCase], tmp_path: Path) -> None:
         """CSV should not contain verdicts."""
-        with patch("redteam.labeling.LABELS_DIR", tmp_path):
-            with patch("redteam.labeling.LABELING_CSV", tmp_path / "labeling.csv"):
-                with patch("redteam.labeling.VERDICTS_FILE", tmp_path / "verdicts.json"):
-                    csv_path = export_labeling_csv(sample_cases)
+        with (
+            patch("redteam.labeling.LABELS_DIR", tmp_path),
+            patch("redteam.labeling.LABELING_CSV", tmp_path / "labeling.csv"),
+            patch("redteam.labeling.LABELING_READABLE", tmp_path / "labeling_readable.md"),
+            patch("redteam.labeling.VERDICTS_FILE", tmp_path / "verdicts.json"),
+        ):
+            csv_path = export_labeling_csv(sample_cases)
 
         # Read CSV and verify no verdicts
         with open(csv_path, newline="", encoding="utf-8") as f:
@@ -77,10 +80,13 @@ class TestExportLabelingCSV:
 
     def test_human_label_column_blank(self, sample_cases: list[LabelingCase], tmp_path: Path) -> None:
         """human_label column should be blank."""
-        with patch("redteam.labeling.LABELS_DIR", tmp_path):
-            with patch("redteam.labeling.LABELING_CSV", tmp_path / "labeling.csv"):
-                with patch("redteam.labeling.VERDICTS_FILE", tmp_path / "verdicts.json"):
-                    csv_path = export_labeling_csv(sample_cases)
+        with (
+            patch("redteam.labeling.LABELS_DIR", tmp_path),
+            patch("redteam.labeling.LABELING_CSV", tmp_path / "labeling.csv"),
+            patch("redteam.labeling.LABELING_READABLE", tmp_path / "labeling_readable.md"),
+            patch("redteam.labeling.VERDICTS_FILE", tmp_path / "verdicts.json"),
+        ):
+            csv_path = export_labeling_csv(sample_cases)
 
         with open(csv_path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -91,10 +97,13 @@ class TestExportLabelingCSV:
     def test_verdicts_saved_separately(self, sample_cases: list[LabelingCase], tmp_path: Path) -> None:
         """Verdicts should be saved to separate file."""
         verdicts_path = tmp_path / "verdicts.json"
-        with patch("redteam.labeling.LABELS_DIR", tmp_path):
-            with patch("redteam.labeling.LABELING_CSV", tmp_path / "labeling.csv"):
-                with patch("redteam.labeling.VERDICTS_FILE", verdicts_path):
-                    export_labeling_csv(sample_cases)
+        with (
+            patch("redteam.labeling.LABELS_DIR", tmp_path),
+            patch("redteam.labeling.LABELING_CSV", tmp_path / "labeling.csv"),
+            patch("redteam.labeling.LABELING_READABLE", tmp_path / "labeling_readable.md"),
+            patch("redteam.labeling.VERDICTS_FILE", verdicts_path),
+        ):
+            export_labeling_csv(sample_cases)
 
         assert verdicts_path.exists()
         with open(verdicts_path, encoding="utf-8") as f:
@@ -111,17 +120,18 @@ class TestScoring:
     """Test scoring functionality."""
 
     def test_score_labels_calculates_metrics(self, tmp_path: Path) -> None:
-        """Scoring should calculate accuracy, precision, recall."""
-        # Create labeling CSV with human labels
+        """Scoring should calculate accuracy, precision, recall for both passes."""
+        # Create labeling CSV with both human_label and human_label_first_pass
         csv_path = tmp_path / "labeling.csv"
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["case_id", "attack_id", "attack_description",
-                           "transcript", "tool_calls", "human_label", "notes"])
-            writer.writerow(["CASE-001", "INJ-001", "desc", "[]", "[]", "true", ""])
-            writer.writerow(["CASE-002", "INJ-002", "desc", "[]", "[]", "false", ""])
-            writer.writerow(["CASE-003", "INJ-003", "desc", "[]", "[]", "true", ""])
-            writer.writerow(["CASE-004", "INJ-004", "desc", "[]", "[]", "false", ""])
+                           "transcript", "tool_calls", "human_label", "notes", "human_label_first_pass"])
+            # First pass and corrected labels are the same for most cases
+            writer.writerow(["CASE-001", "INJ-001", "desc", "[]", "[]", "true", "", "true"])
+            writer.writerow(["CASE-002", "INJ-002", "desc", "[]", "[]", "false", "", "false"])
+            writer.writerow(["CASE-003", "INJ-003", "desc", "[]", "[]", "true", "", "true"])
+            writer.writerow(["CASE-004", "INJ-004", "desc", "[]", "[]", "false", "", "false"])
 
         # Create verdicts file
         verdicts_path = tmp_path / "verdicts.json"
@@ -141,8 +151,40 @@ class TestScoring:
         assert result.labeled_cases == 4
         assert result.total_cases == 4
         # Judge: TP=1, TN=1, FP=1, FN=1 -> accuracy=50%
-        assert result.judge_accuracy == 0.5
+        assert result.judge_corrected.accuracy == 0.5
+        assert result.judge_first_pass.accuracy == 0.5
         assert len(result.judge_disagreements) == 2
+        assert len(result.corrected_case_ids) == 0  # No corrections
+
+    def test_score_labels_tracks_corrections(self, tmp_path: Path) -> None:
+        """Scoring should track which cases were corrected."""
+        csv_path = tmp_path / "labeling.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["case_id", "attack_id", "attack_description",
+                           "transcript", "tool_calls", "human_label", "notes", "human_label_first_pass"])
+            # CASE-001: corrected from false to true
+            writer.writerow(["CASE-001", "INJ-001", "desc", "[]", "[]", "true", "", "false"])
+            # CASE-002: not corrected
+            writer.writerow(["CASE-002", "INJ-002", "desc", "[]", "[]", "false", "", "false"])
+
+        verdicts_path = tmp_path / "verdicts.json"
+        verdicts = {
+            "CASE-001": {"hard_check_succeeded": True, "judge_succeeded": True, "judge_reason": "ok"},
+            "CASE-002": {"hard_check_succeeded": False, "judge_succeeded": False, "judge_reason": "ok"},
+        }
+        with open(verdicts_path, "w", encoding="utf-8") as f:
+            json.dump(verdicts, f)
+
+        with patch("redteam.labeling.LABELING_CSV", csv_path):
+            with patch("redteam.labeling.VERDICTS_FILE", verdicts_path):
+                result = score_labels()
+
+        assert result.corrected_case_ids == ["CASE-001"]
+        # First pass: CASE-001 was false, judge was true -> FP
+        assert result.judge_first_pass.confusion["FP"] == 1
+        # Corrected: CASE-001 is true, judge is true -> TP
+        assert result.judge_corrected.confusion["TP"] == 1
 
     def test_score_labels_lists_disagreements(self, tmp_path: Path) -> None:
         """Disagreements should be listed with details."""
@@ -150,8 +192,8 @@ class TestScoring:
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
             writer.writerow(["case_id", "attack_id", "attack_description",
-                           "transcript", "tool_calls", "human_label", "notes"])
-            writer.writerow(["CASE-001", "INJ-001", "desc", "[]", "[]", "true", ""])
+                           "transcript", "tool_calls", "human_label", "notes", "human_label_first_pass"])
+            writer.writerow(["CASE-001", "INJ-001", "desc", "[]", "[]", "true", "", "true"])
 
         verdicts_path = tmp_path / "verdicts.json"
         verdicts = {

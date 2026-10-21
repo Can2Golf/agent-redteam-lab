@@ -46,7 +46,7 @@ def test_single_live_call(tmp_path) -> None:
     print("LIVE SMOKE TEST RESULTS")
     print("=" * 50)
     print(f"Response: {response.final_answer or response.thought}")
-    print(f"\nToken counts from this call:")
+    print("\nToken counts from this call:")
     last_usage = tracker.usage[-1]
     print(f"  Input tokens:  {last_usage.input_tokens}")
     print(f"  Output tokens: {last_usage.output_tokens}")

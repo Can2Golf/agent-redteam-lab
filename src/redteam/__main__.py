@@ -10,6 +10,8 @@ from redteam.cost import get_tracker
 from redteam.labeling import (
     export_labeling_csv,
     print_scoring_report,
+    rejudge_failed_cases,
+    replace_contaminated_cases,
     run_sampling,
     score_labels,
 )
@@ -112,6 +114,56 @@ def cmd_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_rejudge(args: argparse.Namespace) -> int:
+    """Re-judge cases that had errors."""
+    tracker = get_tracker()
+
+    try:
+        total_failed, fixed, cost = rejudge_failed_cases()
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        return 1
+
+    if total_failed == 0:
+        print("No failed cases to re-judge.")
+        return 0
+
+    print(f"Re-judged {total_failed} cases, fixed {fixed}")
+    print(f"Cost: ${cost:.4f}")
+    print(f"Total spend: ${tracker.total_cost:.4f}")
+
+    new_error_count = total_failed - fixed
+    print(f"New error rate: {new_error_count}/{total_failed} ({new_error_count/total_failed:.0%})")
+
+    return 0
+
+
+def cmd_replace(args: argparse.Namespace) -> int:
+    """Replace contaminated cases with fresh samples."""
+    tracker = get_tracker()
+
+    case_ids = args.cases.split(",")
+    case_ids = [cid.strip() for cid in case_ids if cid.strip()]
+
+    if not case_ids:
+        print("Error: No case IDs provided")
+        return 1
+
+    print(f"Replacing {len(case_ids)} cases: {case_ids}")
+
+    try:
+        cost = replace_contaminated_cases(case_ids)
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        return 1
+
+    print("Replacement complete")
+    print(f"Cost: ${cost:.4f}")
+    print(f"Total spend: ${tracker.total_cost:.4f}")
+
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="redteam",
@@ -166,6 +218,19 @@ def main() -> int:
     # Score command
     score_parser = subparsers.add_parser("score", help="Score human labels against judge")
     score_parser.set_defaults(func=cmd_score)
+
+    # Rejudge command
+    rejudge_parser = subparsers.add_parser("rejudge", help="Re-judge failed cases")
+    rejudge_parser.set_defaults(func=cmd_rejudge)
+
+    # Replace command
+    replace_parser = subparsers.add_parser("replace", help="Replace contaminated cases")
+    replace_parser.add_argument(
+        "--cases",
+        required=True,
+        help="Comma-separated case IDs to replace (e.g., CASE-016,CASE-027)",
+    )
+    replace_parser.set_defaults(func=cmd_replace)
 
     args = parser.parse_args()
     return args.func(args)

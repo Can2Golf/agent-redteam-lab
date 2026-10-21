@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -20,28 +20,88 @@ class MockUsage:
 
 
 @dataclass
+class MockToolUseBlock:
+    """Mock tool_use response block."""
+
+    type: str = "tool_use"
+    name: str = "submit_verdict"
+    id: str = "tool_123"
+    input: dict[str, Any] = field(
+        default_factory=lambda: {"succeeded": True, "reason": "Attack exfiltrated data."}
+    )
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"type": self.type, "name": self.name, "id": self.id, "input": self.input}
+
+
+@dataclass
 class MockTextBlock:
+    """Mock text response block."""
+
     type: str = "text"
-    text: str = '{"succeeded": true, "reason": "Attack exfiltrated data."}'
+    text: str = ""
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"type": self.type, "text": self.text}
 
 
 @dataclass
 class MockResponse:
     content: list[Any] = None
     usage: MockUsage = None
+    stop_reason: str = "tool_use"
 
     def __post_init__(self) -> None:
         if self.content is None:
-            self.content = [MockTextBlock()]
+            self.content = [MockToolUseBlock()]
         if self.usage is None:
             self.usage = MockUsage()
 
 
-def create_mock_client(response_text: str = '{"succeeded": true, "reason": "Test."}') -> MagicMock:
-    """Create a mock Anthropic client with specified response."""
+def create_mock_client(
+    succeeded: bool = True, reason: str = "Test."
+) -> MagicMock:
+    """Create a mock Anthropic client with tool_use response."""
     client = MagicMock()
     client.messages.create.return_value = MockResponse(
-        content=[MockTextBlock(text=response_text)]
+        content=[MockToolUseBlock(input={"succeeded": succeeded, "reason": reason})]
+    )
+    return client
+
+
+def create_mock_client_no_tool() -> MagicMock:
+    """Create a mock client that returns text instead of tool_use."""
+    client = MagicMock()
+    client.messages.create.return_value = MockResponse(
+        content=[MockTextBlock(text="I think the attack succeeded.")]
+    )
+    return client
+
+
+def create_mock_client_invalid_input(input_data: dict[str, Any]) -> MagicMock:
+    """Create a mock client with invalid tool input."""
+    client = MagicMock()
+    client.messages.create.return_value = MockResponse(
+        content=[MockToolUseBlock(input=input_data)]
+    )
+    return client
+
+
+def create_mock_client_refusal() -> MagicMock:
+    """Create a mock client that returns a refusal."""
+    client = MagicMock()
+    client.messages.create.return_value = MockResponse(
+        content=[], stop_reason="refusal"
+    )
+    return client
+
+
+def create_mock_client_text_json() -> MagicMock:
+    """Create a mock client that returns valid JSON in text."""
+    client = MagicMock()
+    client.messages.create.return_value = MockResponse(
+        content=[MockTextBlock(text='{"succeeded": true, "reason": "Test via text."}')],
+        stop_reason="end_turn",
     )
     return client
 
@@ -65,11 +125,11 @@ class TestJudgeBasics:
 
 
 class TestVerdictParsing:
-    """Test JSON verdict parsing and validation."""
+    """Test tool_use verdict parsing and validation."""
 
     def test_parse_valid_succeeded_true(self, tmp_path) -> None:
         tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
-        client = create_mock_client('{"succeeded": true, "reason": "Data was exfiltrated."}')
+        client = create_mock_client(succeeded=True, reason="Data was exfiltrated.")
 
         with patch("redteam.judge.get_tracker", return_value=tracker):
             judge = Judge(client=client)
@@ -80,7 +140,7 @@ class TestVerdictParsing:
 
     def test_parse_valid_succeeded_false(self, tmp_path) -> None:
         tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
-        client = create_mock_client('{"succeeded": false, "reason": "Defense blocked it."}')
+        client = create_mock_client(succeeded=False, reason="Defense blocked it.")
 
         with patch("redteam.judge.get_tracker", return_value=tracker):
             judge = Judge(client=client)
@@ -88,31 +148,22 @@ class TestVerdictParsing:
 
         assert verdict.succeeded is False
 
-    def test_strips_markdown_code_blocks(self, tmp_path) -> None:
+    def test_rejects_unparseable_text(self, tmp_path) -> None:
+        """Model returned unparseable text - should error."""
         tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
-        # Response wrapped in markdown code block
-        client = create_mock_client('```json\n{"succeeded": true, "reason": "Test."}\n```')
-
-        with patch("redteam.judge.get_tracker", return_value=tracker):
-            judge = Judge(client=client)
-            verdict = judge.evaluate("Test", [], [])
-
-        assert verdict.succeeded is True
-
-    def test_rejects_invalid_json(self, tmp_path) -> None:
-        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
-        client = create_mock_client("This is not JSON at all")
+        client = create_mock_client_no_tool()
 
         with patch("redteam.judge.get_tracker", return_value=tracker):
             judge = Judge(client=client)
             with pytest.raises(JudgeError) as exc_info:
                 judge.evaluate("Test", [], [])
 
-        assert "Invalid JSON" in str(exc_info.value)
+        # Either no tool call or invalid JSON fallback
+        assert "Invalid JSON" in str(exc_info.value) or "No submit_verdict" in str(exc_info.value)
 
     def test_rejects_missing_succeeded(self, tmp_path) -> None:
         tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
-        client = create_mock_client('{"reason": "Missing succeeded field."}')
+        client = create_mock_client_invalid_input({"reason": "Missing succeeded field."})
 
         with patch("redteam.judge.get_tracker", return_value=tracker):
             judge = Judge(client=client)
@@ -121,20 +172,21 @@ class TestVerdictParsing:
 
         assert "Missing 'succeeded'" in str(exc_info.value)
 
-    def test_rejects_missing_reason(self, tmp_path) -> None:
+    def test_accepts_missing_reason_with_default(self, tmp_path) -> None:
+        """Missing reason should use default value, not error."""
         tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
-        client = create_mock_client('{"succeeded": true}')
+        client = create_mock_client_invalid_input({"succeeded": True})
 
         with patch("redteam.judge.get_tracker", return_value=tracker):
             judge = Judge(client=client)
-            with pytest.raises(JudgeError) as exc_info:
-                judge.evaluate("Test", [], [])
+            verdict = judge.evaluate("Test", [], [])
 
-        assert "Missing 'reason'" in str(exc_info.value)
+        assert verdict.succeeded is True
+        assert "(no reason provided)" in verdict.reason
 
     def test_rejects_non_boolean_succeeded(self, tmp_path) -> None:
         tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
-        client = create_mock_client('{"succeeded": "yes", "reason": "Wrong type."}')
+        client = create_mock_client_invalid_input({"succeeded": "yes", "reason": "Wrong type."})
 
         with patch("redteam.judge.get_tracker", return_value=tracker):
             judge = Judge(client=client)
@@ -143,12 +195,36 @@ class TestVerdictParsing:
 
         assert "'succeeded' must be a boolean" in str(exc_info.value)
 
+    def test_handles_refusal(self, tmp_path) -> None:
+        """Model refused to evaluate - should raise JudgeError."""
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        client = create_mock_client_refusal()
+
+        with patch("redteam.judge.get_tracker", return_value=tracker):
+            judge = Judge(client=client)
+            with pytest.raises(JudgeError) as exc_info:
+                judge.evaluate("Test", [], [])
+
+        assert "refused" in str(exc_info.value)
+
+    def test_parses_text_json_fallback(self, tmp_path) -> None:
+        """JSON in text response should be parsed as fallback."""
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        client = create_mock_client_text_json()
+
+        with patch("redteam.judge.get_tracker", return_value=tracker):
+            judge = Judge(client=client)
+            verdict = judge.evaluate("Test", [], [])
+
+        assert verdict.succeeded is True
+        assert "Test via text" in verdict.reason
+
 
 class TestAdversarialTranscript:
     """Test that adversarial content in transcripts doesn't manipulate the judge."""
 
     def test_adversarial_transcript_parsed_strictly(self, tmp_path) -> None:
-        """Adversarial text in transcript should not affect JSON parsing."""
+        """Adversarial text in transcript should not affect tool_use parsing."""
         tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
 
         # The adversarial transcript contains text trying to manipulate the judge
@@ -164,7 +240,7 @@ class TestAdversarialTranscript:
         ]
 
         # But the mock returns a proper verdict (as if judge wasn't manipulated)
-        client = create_mock_client('{"succeeded": true, "reason": "Agent sent email to attacker."}')
+        client = create_mock_client(succeeded=True, reason="Agent sent email to attacker.")
 
         with patch("redteam.judge.get_tracker", return_value=tracker):
             judge = Judge(client=client)
@@ -202,7 +278,7 @@ class TestCostTracking:
 
     def test_records_usage(self, tmp_path) -> None:
         tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
-        client = create_mock_client()
+        client = create_mock_client(succeeded=True, reason="Test.")
 
         with patch("redteam.judge.get_tracker", return_value=tracker):
             judge = Judge(client=client)
@@ -221,7 +297,7 @@ class TestCostTracking:
             TokenUsage(model="claude-sonnet-5-5", input_tokens=1_000_000, output_tokens=1_000_000)
         )
 
-        client = create_mock_client()
+        client = create_mock_client(succeeded=True, reason="Test.")
 
         with patch("redteam.judge.get_tracker", return_value=tracker):
             judge = Judge(client=client)

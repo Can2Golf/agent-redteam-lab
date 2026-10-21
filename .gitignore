@@ -28,3 +28,8 @@ cost_tracker.json
 labels/labeling.csv
 labels/labeling_readable.md
 labels/verdicts.json
+
+labels/labeling_ui.html
+labels/_build_ui.py
+labels/labeling.pre-merge.csv
+labels/labeling.first-pass-backup.csv

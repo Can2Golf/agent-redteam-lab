@@ -33,3 +33,6 @@ labels/labeling_ui.html
 labels/_build_ui.py
 labels/labeling.pre-merge.csv
 labels/labeling.first-pass-backup.csv
+
+# Generated attacks - pending review
+src/redteam/attacks/generated/

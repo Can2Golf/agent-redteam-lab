@@ -6,9 +6,13 @@ import os
 from dataclasses import dataclass
 
 # Model IDs - configurable via environment
-# Defaults: cheapest Haiku as target, Sonnet as judge
+# Defaults: cheapest Haiku as target, Sonnet as judge/generator
 TARGET_MODEL = os.environ.get("REDTEAM_TARGET_MODEL", "claude-haiku-5-5")
 JUDGE_MODEL = os.environ.get("REDTEAM_JUDGE_MODEL", "claude-sonnet-5-5")
+GENERATOR_MODEL = os.environ.get("REDTEAM_GENERATOR_MODEL", "claude-sonnet-5-5")
+
+# Generator limits
+MAX_ATTACKS_PER_RUN = 30
 
 # Pricing per million tokens
 # Source: https://platform.claude.com/docs/en/about-claude/pricing (Oct 2026)

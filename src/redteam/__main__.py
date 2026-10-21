@@ -6,7 +6,15 @@ import argparse
 import sys
 from pathlib import Path
 
+from redteam.config import MAX_ATTACKS_PER_RUN
 from redteam.cost import get_tracker
+from redteam.generator import (
+    VALID_CATEGORIES,
+    AttackGenerator,
+    list_pending_attacks,
+    save_generated_attacks,
+    update_attack_status,
+)
 from redteam.labeling import (
     export_labeling_csv,
     print_scoring_report,
@@ -164,10 +172,140 @@ def cmd_replace(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_generate(args: argparse.Namespace) -> int:
+    """Generate novel attacks using LLM."""
+    tracker = get_tracker()
+
+    generator = AttackGenerator(
+        dry_run=args.dry_run,
+        white_box=args.white_box,
+    )
+
+    if args.dry_run:
+        print("DRY RUN: Estimating cost for attack generation...")
+        print(f"Mode: {generator.mode}")
+        est_cost = generator.estimate_cost(args.count)
+        print(f"\nEstimated cost: ${est_cost:.4f}")
+        print(f"Current spend:  ${tracker.total_cost:.4f}")
+        print(f"Budget cap:     ${tracker.cap_usd:.2f}")
+        print(f"Remaining:      ${tracker.remaining_budget:.4f}")
+        projected = tracker.total_cost + est_cost
+        if projected > tracker.cap_usd:
+            print(f"\nWARNING: Projected total ${projected:.4f} exceeds cap!")
+            return 1
+        print("\nRun without --dry-run to execute.")
+        return 0
+
+    print(f"Generating {args.count} attacks...")
+    print(f"Mode: {generator.mode}")
+    if args.category:
+        print(f"Category focus: {args.category}")
+    if args.from_attack:
+        print(f"Variations of: {args.from_attack}")
+    print()
+
+    try:
+        if args.vary_all:
+            result = generator.generate_variations_all(variations_per_attack=3)
+        else:
+            result = generator.generate(
+                count=args.count,
+                category=args.category,
+                from_attack=args.from_attack,
+            )
+    except Exception as e:
+        print(f"Error: {e}")
+        return 1
+
+    print(f"\nGenerated {len(result.attacks)} attacks")
+    if result.refusal_count > 0:
+        print(f"Refusals: {result.refusal_count}")
+
+    if not result.attacks:
+        print("No attacks generated.")
+        return 0
+
+    # Save to pending file
+    saved = save_generated_attacks(result.attacks)
+    print(f"Saved {saved} attacks to pending review")
+
+    # Show summary
+    print("\nGenerated attacks:")
+    for attack in result.attacks:
+        print(f"  {attack.id}: {attack.name} [{attack.category}]")
+
+    print(f"\nCost: ${tracker.total_cost:.4f}")
+    print("\nNext steps:")
+    print("  python -m redteam generate-review  # Review pending attacks")
+    print("  python -m redteam generate-approve GEN-001  # Approve by ID")
+
+    return 0
+
+
+def cmd_generate_review(args: argparse.Namespace) -> int:
+    """List pending attacks for review."""
+    pending = list_pending_attacks()
+
+    if not pending:
+        print("No pending attacks to review.")
+        return 0
+
+    print(f"Pending attacks: {len(pending)}\n")
+
+    for attack in pending:
+        print(f"{'=' * 60}")
+        print(f"ID: {attack['id']}")
+        print(f"Name: {attack['name']}")
+        print(f"Category: {attack['category']}")
+        print(f"Mode: {attack.get('mode', 'unknown')}")
+        print(f"Model: {attack.get('model', 'unknown')}")
+        print(f"Date: {attack.get('date', 'unknown')}")
+        if attack.get("based_on"):
+            print(f"Based on: {attack['based_on']}")
+        print(f"\nTask: {attack['task']}")
+        print(f"\nSuccess checks: {attack['success_checks']}")
+        if attack.get("setup"):
+            import json
+            print(f"\nSetup:\n{json.dumps(attack['setup'], indent=2)}")
+        print()
+
+    print(f"{'=' * 60}")
+    print("\nTo approve: python -m redteam generate-approve <ID>")
+    print("To reject:  python -m redteam generate-reject <ID>")
+
+    return 0
+
+
+def cmd_generate_approve(args: argparse.Namespace) -> int:
+    """Approve a pending attack by ID."""
+    attack_id = args.id
+
+    if update_attack_status(attack_id, "approved"):
+        print(f"Approved: {attack_id}")
+        print("Attack will be included in future runs.")
+        return 0
+    else:
+        print(f"Error: Attack {attack_id} not found in pending")
+        return 1
+
+
+def cmd_generate_reject(args: argparse.Namespace) -> int:
+    """Reject a pending attack by ID."""
+    attack_id = args.id
+
+    if update_attack_status(attack_id, "rejected"):
+        print(f"Rejected: {attack_id}")
+        print("Attack will not be included in runs.")
+        return 0
+    else:
+        print(f"Error: Attack {attack_id} not found in pending")
+        return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="redteam",
-        description="Red team testing framework for AI agents (Stage 1: deterministic)",
+        description="Red team testing framework for AI agents",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -201,7 +339,9 @@ def main() -> int:
     report_parser.set_defaults(func=cmd_report)
 
     # Label command
-    label_parser = subparsers.add_parser("label", help="Generate labeling CSV for human evaluation")
+    label_parser = subparsers.add_parser(
+        "label", help="Generate labeling CSV for human evaluation"
+    )
     label_parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -216,7 +356,9 @@ def main() -> int:
     label_parser.set_defaults(func=cmd_label)
 
     # Score command
-    score_parser = subparsers.add_parser("score", help="Score human labels against judge")
+    score_parser = subparsers.add_parser(
+        "score", help="Score human labels against judge"
+    )
     score_parser.set_defaults(func=cmd_score)
 
     # Rejudge command
@@ -231,6 +373,63 @@ def main() -> int:
         help="Comma-separated case IDs to replace (e.g., CASE-016,CASE-027)",
     )
     replace_parser.set_defaults(func=cmd_replace)
+
+    # Generate command
+    generate_parser = subparsers.add_parser(
+        "generate", help="Generate novel attacks using LLM"
+    )
+    generate_parser.add_argument(
+        "--count",
+        type=int,
+        default=5,
+        help=f"Number of attacks to generate (default: 5, max: {MAX_ATTACKS_PER_RUN})",
+    )
+    generate_parser.add_argument(
+        "--category",
+        choices=VALID_CATEGORIES,
+        help="Focus on specific category",
+    )
+    generate_parser.add_argument(
+        "--white-box",
+        action="store_true",
+        help="Include defense details in prompt (default: black-box)",
+    )
+    generate_parser.add_argument(
+        "--from-attack",
+        metavar="ID",
+        help="Generate variations of an existing attack by ID",
+    )
+    generate_parser.add_argument(
+        "--vary-all",
+        action="store_true",
+        help="Generate 3 variations for each existing attack (capped at max)",
+    )
+    generate_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Estimate cost without running",
+    )
+    generate_parser.set_defaults(func=cmd_generate)
+
+    # Generate-review command
+    review_parser = subparsers.add_parser(
+        "generate-review", help="List pending generated attacks for review"
+    )
+    review_parser.set_defaults(func=cmd_generate_review)
+
+    # Generate-approve command
+    approve_parser = subparsers.add_parser(
+        "generate-approve", help="Approve a pending generated attack"
+    )
+    approve_parser.add_argument("id", help="Attack ID to approve (e.g., GEN-001)")
+    approve_parser.set_defaults(func=cmd_generate_approve)
+
+    # Generate-reject command
+    reject_parser = subparsers.add_parser(
+        "generate-reject", help="Reject a pending generated attack"
+    )
+    reject_parser.add_argument("id", help="Attack ID to reject (e.g., GEN-001)")
+    reject_parser.set_defaults(func=cmd_generate_reject)
 
     args = parser.parse_args()
     return args.func(args)

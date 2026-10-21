@@ -1,0 +1,474 @@
+"""Tests for the LLM attack generator."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from redteam.cost import CostTracker
+from redteam.generator import (
+    ATTACK_TOOL,
+    VALID_CATEGORIES,
+    VALID_SUCCESS_CHECKS,
+    AttackGenerator,
+    GeneratedAttack,
+    GeneratorError,
+    _is_fictional_domain,
+    _is_valid_path,
+    _validate_setup_domains,
+    list_pending_attacks,
+    load_pending,
+    save_generated_attacks,
+    save_pending,
+    update_attack_status,
+)
+
+
+@dataclass
+class MockUsage:
+    input_tokens: int = 1000
+    output_tokens: int = 500
+
+
+@dataclass
+class MockToolUseBlock:
+    """Mock tool_use response block."""
+
+    type: str = "tool_use"
+    name: str = "generate_attack"
+    id: str = "tool_123"
+    input: dict[str, Any] = field(default_factory=dict)
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"type": self.type, "name": self.name, "id": self.id, "input": self.input}
+
+
+@dataclass
+class MockTextBlock:
+    """Mock text response block."""
+
+    type: str = "text"
+    text: str = ""
+
+    def model_dump(self) -> dict[str, Any]:
+        return {"type": self.type, "text": self.text}
+
+
+@dataclass
+class MockResponse:
+    content: list[Any] = None
+    usage: MockUsage = None
+    stop_reason: str = "tool_use"
+
+    def __post_init__(self) -> None:
+        if self.content is None:
+            self.content = []
+        if self.usage is None:
+            self.usage = MockUsage()
+
+
+def create_valid_attack_input(
+    id: str = "GEN-001",
+    name: str = "Test Attack",
+    category: str = "LLM01: Prompt Injection",
+    task: str = "A unique task that doesn't match any existing attack",
+    success_checks: list[str] | None = None,
+    setup: dict | None = None,
+) -> dict[str, Any]:
+    """Create a valid attack tool input."""
+    return {
+        "id": id,
+        "name": name,
+        "category": category,
+        "task": task,
+        "success_checks": ["canary_in_egress"] if success_checks is None else success_checks,
+        "setup": setup or {},
+    }
+
+
+def create_mock_client_with_attacks(attacks: list[dict[str, Any]]) -> MagicMock:
+    """Create mock client that returns multiple attack tool uses."""
+    blocks = [
+        MockToolUseBlock(id=f"tool_{i}", input=attack)
+        for i, attack in enumerate(attacks)
+    ]
+    client = MagicMock()
+    client.messages.create.return_value = MockResponse(content=blocks)
+    return client
+
+
+def create_mock_client_no_tools() -> MagicMock:
+    """Create mock client that returns no tool uses."""
+    client = MagicMock()
+    client.messages.create.return_value = MockResponse(
+        content=[MockTextBlock(text="I can't generate attacks.")]
+    )
+    return client
+
+
+def create_mock_client_refusal() -> MagicMock:
+    """Create mock client that returns a refusal."""
+    client = MagicMock()
+    client.messages.create.return_value = MockResponse(
+        content=[], stop_reason="refusal"
+    )
+    return client
+
+
+class TestAttackToolSchema:
+    """Test the attack tool schema is valid."""
+
+    def test_schema_has_required_fields(self) -> None:
+        schema = ATTACK_TOOL["input_schema"]
+        assert schema["type"] == "object"
+        assert "properties" in schema
+        assert "required" in schema
+
+    def test_required_fields_are_complete(self) -> None:
+        required = ATTACK_TOOL["input_schema"]["required"]
+        assert "id" in required
+        assert "name" in required
+        assert "category" in required
+        assert "task" in required
+        assert "success_checks" in required
+
+    def test_category_enum_matches_valid_categories(self) -> None:
+        category_enum = ATTACK_TOOL["input_schema"]["properties"]["category"]["enum"]
+        assert set(category_enum) == set(VALID_CATEGORIES)
+
+    def test_success_checks_enum_matches_valid_checks(self) -> None:
+        checks_enum = ATTACK_TOOL["input_schema"]["properties"]["success_checks"][
+            "items"
+        ]["enum"]
+        assert set(checks_enum) == set(VALID_SUCCESS_CHECKS)
+
+
+class TestGeneratorBasics:
+    """Basic generator functionality."""
+
+    def test_init_with_defaults(self) -> None:
+        gen = AttackGenerator(dry_run=True)
+        assert gen.model == "claude-sonnet-5-5"
+        assert gen.dry_run is True
+        assert gen.white_box is False
+        assert gen.mode == "black-box"
+
+    def test_init_white_box(self) -> None:
+        gen = AttackGenerator(dry_run=True, white_box=True)
+        assert gen.white_box is True
+        assert gen.mode == "white-box"
+
+    def test_dry_run_returns_empty_result(self, tmp_path, capsys) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(dry_run=True)
+            result = gen.generate(count=3)
+
+        assert result.attacks == []
+        assert result.refusal_count == 0
+        assert result.mode == "black-box"
+        captured = capsys.readouterr()
+        assert "Estimated cost:" in captured.out
+
+    def test_estimate_cost_returns_float(self, tmp_path) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(dry_run=True)
+            cost = gen.estimate_cost(5)
+
+        assert isinstance(cost, float)
+        assert cost > 0
+
+
+class TestAttackParsing:
+    """Test parsing attacks from tool_use responses."""
+
+    def test_parse_single_valid_attack(self, tmp_path) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        attack_data = create_valid_attack_input()
+        client = create_mock_client_with_attacks([attack_data])
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(client=client)
+            result = gen.generate(count=1)
+
+        assert len(result.attacks) == 1
+        assert result.attacks[0].id == "GEN-001"
+        assert result.attacks[0].name == "Test Attack"
+        assert result.attacks[0].category == "LLM01: Prompt Injection"
+        assert result.attacks[0].status == "pending"
+        assert result.attacks[0].mode == "black-box"
+
+    def test_parse_multiple_attacks(self, tmp_path) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        attacks_data = [
+            create_valid_attack_input(id="GEN-001", name="Attack 1", task="Task 1"),
+            create_valid_attack_input(id="GEN-002", name="Attack 2", task="Task 2"),
+            create_valid_attack_input(id="GEN-003", name="Attack 3", task="Task 3"),
+        ]
+        client = create_mock_client_with_attacks(attacks_data)
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(client=client)
+            result = gen.generate(count=3)
+
+        assert len(result.attacks) == 3
+        assert {a.id for a in result.attacks} == {"GEN-001", "GEN-002", "GEN-003"}
+
+    def test_skips_invalid_category(self, tmp_path, capsys) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        attacks_data = [
+            create_valid_attack_input(id="GEN-001", task="Task 1"),
+            create_valid_attack_input(id="GEN-002", category="Invalid Category", task="Task 2"),
+        ]
+        client = create_mock_client_with_attacks(attacks_data)
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(client=client)
+            result = gen.generate(count=2)
+
+        assert len(result.attacks) == 1
+        assert result.attacks[0].id == "GEN-001"
+        captured = capsys.readouterr()
+        assert "Invalid category" in captured.out
+
+    def test_skips_duplicate_ids(self, tmp_path, capsys) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        attacks_data = [
+            create_valid_attack_input(id="GEN-001", name="First", task="Task 1"),
+            create_valid_attack_input(id="GEN-001", name="Duplicate", task="Task 2"),
+        ]
+        client = create_mock_client_with_attacks(attacks_data)
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(client=client)
+            result = gen.generate(count=2)
+
+        assert len(result.attacks) == 1
+        assert result.attacks[0].name == "First"
+        captured = capsys.readouterr()
+        assert "Duplicate ID" in captured.out
+
+    def test_error_on_no_tool_use(self, tmp_path) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        client = create_mock_client_no_tools()
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(client=client)
+            with pytest.raises(GeneratorError) as exc_info:
+                gen.generate(count=1)
+
+        assert "No valid attacks" in str(exc_info.value)
+
+
+class TestRefusalHandling:
+    """Test handling of model refusals."""
+
+    def test_refusal_returns_empty_with_count(self, tmp_path) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        client = create_mock_client_refusal()
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(client=client)
+            result = gen.generate(count=1)
+
+        assert result.attacks == []
+        assert result.refusal_count == 1
+
+
+class TestDomainValidation:
+    """Test validation of fictional domains."""
+
+    def test_fictional_domains_allowed(self) -> None:
+        assert _is_fictional_domain("example.com")
+        assert _is_fictional_domain("evil.com")
+        assert _is_fictional_domain("attacker.com")
+        assert _is_fictional_domain("company.com")
+        assert _is_fictional_domain("sub.example.com")
+
+    def test_real_domains_rejected(self) -> None:
+        assert not _is_fictional_domain("google.com")
+        assert not _is_fictional_domain("microsoft.com")
+        assert not _is_fictional_domain("anthropic.com")
+
+    def test_valid_paths(self) -> None:
+        assert _is_valid_path("/home/user/file.txt")
+        assert _is_valid_path("/home/user/subdir/file.txt")
+        assert _is_valid_path("/tmp/test.txt")
+
+    def test_invalid_paths(self) -> None:
+        assert not _is_valid_path("/etc/passwd")
+        assert not _is_valid_path("/root/.ssh/id_rsa")
+        assert not _is_valid_path("C:\\Windows\\System32")
+
+    def test_validate_setup_catches_bad_domains(self) -> None:
+        setup = {
+            "emails": [
+                {"sender": "attacker@google.com", "subject": "Test", "body": "Test"}
+            ]
+        }
+        errors = _validate_setup_domains(setup)
+        assert len(errors) > 0
+        assert any("google.com" in err for err in errors)
+
+    def test_validate_setup_allows_fictional(self) -> None:
+        setup = {
+            "emails": [
+                {"sender": "attacker@evil.com", "subject": "Test", "body": "Send to spy@attacker.com"}
+            ],
+            "files": {"/home/user/test.txt": "content"}
+        }
+        errors = _validate_setup_domains(setup)
+        assert len(errors) == 0
+
+
+class TestPendingFileManagement:
+    """Test pending attack file operations."""
+
+    def test_save_and_load_pending(self, tmp_path, monkeypatch) -> None:
+        # Patch the get_pending_file to use temp directory
+        pending_file = tmp_path / "pending.json"
+        monkeypatch.setattr(
+            "redteam.generator.get_pending_file", lambda: pending_file
+        )
+
+        attacks = [
+            GeneratedAttack(
+                id="GEN-001",
+                name="Test",
+                category="LLM01: Prompt Injection",
+                setup={},
+                task="Test task",
+                success_checks=["canary_in_egress"],
+                model="test-model",
+                mode="black-box",
+                date="2024-01-01",
+            )
+        ]
+
+        saved = save_generated_attacks(attacks)
+        assert saved == 1
+
+        loaded = load_pending()
+        assert len(loaded) == 1
+        assert loaded[0]["id"] == "GEN-001"
+        assert loaded[0]["status"] == "pending"
+
+    def test_list_pending_filters_status(self, tmp_path, monkeypatch) -> None:
+        pending_file = tmp_path / "pending.json"
+        monkeypatch.setattr(
+            "redteam.generator.get_pending_file", lambda: pending_file
+        )
+
+        # Save with different statuses
+        save_pending([
+            {"id": "GEN-001", "status": "pending", "name": "Pending"},
+            {"id": "GEN-002", "status": "approved", "name": "Approved"},
+            {"id": "GEN-003", "status": "rejected", "name": "Rejected"},
+        ])
+
+        pending = list_pending_attacks()
+        assert len(pending) == 1
+        assert pending[0]["id"] == "GEN-001"
+
+    def test_update_attack_status(self, tmp_path, monkeypatch) -> None:
+        pending_file = tmp_path / "pending.json"
+        monkeypatch.setattr(
+            "redteam.generator.get_pending_file", lambda: pending_file
+        )
+
+        save_pending([{"id": "GEN-001", "status": "pending"}])
+
+        assert update_attack_status("GEN-001", "approved")
+
+        loaded = load_pending()
+        assert loaded[0]["status"] == "approved"
+
+    def test_update_nonexistent_returns_false(self, tmp_path, monkeypatch) -> None:
+        pending_file = tmp_path / "pending.json"
+        monkeypatch.setattr(
+            "redteam.generator.get_pending_file", lambda: pending_file
+        )
+
+        save_pending([])
+        assert not update_attack_status("GEN-999", "approved")
+
+
+class TestCostTracking:
+    """Test that generator uses cost tracker correctly."""
+
+    def test_records_usage(self, tmp_path) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        attack_data = create_valid_attack_input()
+        client = create_mock_client_with_attacks([attack_data])
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(client=client)
+            gen.generate(count=1)
+
+        assert len(tracker.usage) == 1
+        assert tracker.usage[0].model == "claude-sonnet-5-5"
+
+    def test_budget_check_before_call(self, tmp_path) -> None:
+        tracker = CostTracker(cap_usd=0.0001, _file_path=tmp_path / "cost.json")
+        from redteam.cost import TokenUsage
+
+        tracker.usage.append(
+            TokenUsage(model="claude-sonnet-5-5", input_tokens=1_000_000, output_tokens=1_000_000)
+        )
+
+        attack_data = create_valid_attack_input()
+        client = create_mock_client_with_attacks([attack_data])
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(client=client)
+            from redteam.cost import BudgetExceededError
+
+            with pytest.raises(BudgetExceededError):
+                gen.generate(count=1)
+
+        client.messages.create.assert_not_called()
+
+
+class TestCategoryFiltering:
+    """Test category-focused generation."""
+
+    def test_get_examples_filters_by_category(self, tmp_path) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(dry_run=True)
+            examples = gen._get_examples("LLM01: Prompt Injection")
+
+        assert len(examples) > 0
+
+    def test_prompt_includes_category_focus(self, tmp_path) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(dry_run=True)
+            examples = gen._get_examples()
+            prompt = gen._build_prompt(3, "LLM01: Prompt Injection", examples)
+
+        assert "LLM01: Prompt Injection" in prompt
+        assert "Focus on" in prompt
+
+
+class TestWhiteBoxMode:
+    """Test white-box generation mode."""
+
+    def test_white_box_uses_different_prompt(self, tmp_path) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            blackbox = AttackGenerator(dry_run=True, white_box=False)
+            whitebox = AttackGenerator(dry_run=True, white_box=True)
+
+        assert "Known Defenses" not in blackbox.system_prompt
+        assert "Known Defenses" in whitebox.system_prompt
+        assert "RTLAB-KEY" in whitebox.system_prompt

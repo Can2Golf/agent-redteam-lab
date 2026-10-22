@@ -5,7 +5,20 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from redteam.runner import RunResults
+from redteam.runner import RunResults, is_benign_category
+
+ATTACK_LEGEND = (
+    "_Attack Conditions Met: the attack achieved that goal. "
+    "Not Met: blocked or never attempted._"
+)
+TASK_LEGEND = (
+    "_Task Checks Met: the legitimate task completed that step. "
+    "Not Met: the step did not complete._"
+)
+
+
+def _checks(names: list[str]) -> str:
+    return ", ".join(names) or "-"
 
 
 def generate_report(naive_results: RunResults, guarded_results: RunResults) -> str:
@@ -17,14 +30,22 @@ def generate_report(naive_results: RunResults, guarded_results: RunResults) -> s
         "",
         "## Summary",
         "",
-        "| Config | Attacks | Successful | Success Rate |",
-        "|--------|---------|------------|--------------|",
-        f"| Naive | {naive_results.total_attacks} | {naive_results.successful_attacks} | {naive_results.success_rate:.1%} |",
-        f"| Guarded | {guarded_results.total_attacks} | {guarded_results.successful_attacks} | {guarded_results.success_rate:.1%} |",
+        "| Config | Attack Success | Attack Success Rate | Benign Completed | Benign Completion Rate |",
+        "|--------|----------------|---------------------|------------------|------------------------|",
+    ]
+    for label, r in (("Naive", naive_results), ("Guarded", guarded_results)):
+        lines.append(
+            f"| {label} | {r.successful_attacks}/{r.total_attacks} | {r.success_rate:.1%} "
+            f"| {r.benign_completed}/{r.benign_total} | {r.benign_completion_rate:.1%} |"
+        )
+    lines.extend([
+        "",
+        "_Attack success counts attacks only. Benign completion counts legitimate tasks that "
+        "finished; it is not an attack success._",
         "",
         "## Results by OWASP Category",
         "",
-    ]
+    ])
 
     # Combine categories from both
     all_cats = set(naive_results.by_category.keys()) | set(guarded_results.by_category.keys())
@@ -39,6 +60,9 @@ def generate_report(naive_results: RunResults, guarded_results: RunResults) -> s
 
     lines.extend([
         "",
+        "_Attack categories show attack successes / attacks. The Benign row shows tasks "
+        "completed / tasks._",
+        "",
         "## Attack Details",
         "",
     ])
@@ -46,19 +70,27 @@ def generate_report(naive_results: RunResults, guarded_results: RunResults) -> s
     # Show all attacks with their results
     for naive_r in naive_results.results:
         guarded_r = next((r for r in guarded_results.results if r.attack_id == naive_r.attack_id), None)
+        benign = is_benign_category(naive_r.category)
 
-        naive_status = "PASS" if naive_r.success else "BLOCKED"
-        guarded_status = "PASS" if guarded_r and guarded_r.success else "BLOCKED"
+        if benign:
+            header = "| Config | Result | Task Checks Met | Task Checks Not Met |"
+            yes, no, legend = "COMPLETED", "NOT COMPLETED", TASK_LEGEND
+        else:
+            header = "| Config | Result | Attack Conditions Met | Attack Conditions Not Met |"
+            yes, no, legend = "PASS", "BLOCKED", ATTACK_LEGEND
 
         lines.append(f"### {naive_r.attack_id}: {naive_r.attack_name}")
         lines.append("")
         lines.append(f"**Category:** {naive_r.category}")
         lines.append("")
-        lines.append("| Config | Result | Checks Passed | Checks Failed |")
-        lines.append("|--------|--------|---------------|---------------|")
-        lines.append(f"| Naive | {naive_status} | {', '.join(naive_r.checks_passed) or '-'} | {', '.join(naive_r.checks_failed) or '-'} |")
-        if guarded_r:
-            lines.append(f"| Guarded | {guarded_status} | {', '.join(guarded_r.checks_passed) or '-'} | {', '.join(guarded_r.checks_failed) or '-'} |")
+        lines.append(header)
+        lines.append("|--------|--------|------|----------|")
+        rows = [("Naive", naive_r)] + ([("Guarded", guarded_r)] if guarded_r else [])
+        for label, r in rows:
+            status = yes if r.success else no
+            lines.append(f"| {label} | {status} | {_checks(r.checks_passed)} | {_checks(r.checks_failed)} |")
+        lines.append("")
+        lines.append(legend)
         lines.append("")
 
     # Known gaps section
@@ -70,7 +102,7 @@ def generate_report(naive_results: RunResults, guarded_results: RunResults) -> s
     ])
 
     for guarded_r in guarded_results.results:
-        if guarded_r.success:
+        if guarded_r.success and not is_benign_category(guarded_r.category):
             lines.append(f"### {guarded_r.attack_id}: {guarded_r.attack_name}")
             lines.append("")
             lines.append("**Why it bypasses defenses:**")
@@ -107,4 +139,7 @@ def load_latest_results(results_dir: Path, config_name: str) -> RunResults | Non
         success_rate=data["success_rate"],
         results=[AttackResult(**r) for r in data["results"]],
         by_category=data["by_category"],
+        benign_total=data.get("benign_total", 0),
+        benign_completed=data.get("benign_completed", 0),
+        benign_completion_rate=data.get("benign_completion_rate", 0.0),
     )

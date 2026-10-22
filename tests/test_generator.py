@@ -29,7 +29,8 @@ from redteam.generator import (
 
 @pytest.fixture(autouse=True)
 def isolated_generation_log(tmp_path, monkeypatch):
-    """Keep tests from writing to the real generation log."""
+    """Keep tests from writing to the real generation log or tracked approved file."""
+    monkeypatch.setattr("redteam.generator.get_approved_file", lambda: tmp_path / "approved.json")
     log_file = tmp_path / "generation_log.jsonl"
     monkeypatch.setattr("redteam.generator.get_generation_log_file", lambda: log_file)
     return log_file
@@ -405,8 +406,9 @@ class TestPendingFileManagement:
 
         assert update_attack_status("GEN-001", "approved", by="Reviewer")
 
-        loaded = load_pending()
-        assert loaded[0]["status"] == "approved"
+        from redteam.generator import load_approved_records
+        assert load_pending() == []
+        assert load_approved_records()[0]["status"] == "approved"
 
     def test_update_nonexistent_returns_false(self, tmp_path, monkeypatch) -> None:
         pending_file = tmp_path / "pending.json"
@@ -421,16 +423,30 @@ class TestPendingFileManagement:
 class TestApprovalRecord:
     """Approvals record who approved and when."""
 
-    def test_approval_records_by_and_at(self, tmp_path, monkeypatch) -> None:
+    def test_approval_moves_record_with_by_and_at(self, tmp_path, monkeypatch) -> None:
+        from redteam.generator import load_approved_records
+
         pending_file = tmp_path / "pending.json"
         monkeypatch.setattr("redteam.generator.get_pending_file", lambda: pending_file)
-        save_pending([{"id": "GEN-001", "status": "pending"}])
+        save_pending([{"id": "GEN-001", "status": "pending"}, {"id": "GEN-002", "status": "pending"}])
 
         assert update_attack_status("GEN-001", "approved", by="Matthew Cantu")
 
-        record = load_pending()[0]
+        assert [a["id"] for a in load_pending()] == ["GEN-002"]
+        record = load_approved_records()[0]
+        assert record["id"] == "GEN-001"
         assert record["approved_by"] == "Matthew Cantu"
         assert record["approved_at"].endswith("+00:00")
+
+    def test_save_skips_ids_already_approved(self, tmp_path, monkeypatch) -> None:
+        from redteam.generator import save_approved_records
+
+        monkeypatch.setattr("redteam.generator.get_pending_file", lambda: tmp_path / "pending.json")
+        save_approved_records([{"id": "GEN-001", "status": "approved"}])
+
+        attack = GeneratedAttack(id="GEN-001", name="n", category="LLM01: Prompt Injection",
+                                 setup={}, task="t", success_checks=["canary_in_egress"])
+        assert save_generated_attacks([attack]) == 0
 
     def test_approval_without_approver_raises(self, tmp_path, monkeypatch) -> None:
         pending_file = tmp_path / "pending.json"

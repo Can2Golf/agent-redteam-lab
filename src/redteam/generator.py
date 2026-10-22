@@ -279,6 +279,29 @@ def get_pending_file() -> Path:
     return generated_dir / "pending.json"
 
 
+def get_approved_file() -> Path:
+    """Get path to the tracked file of approved generated attacks."""
+    approved_dir = Path(__file__).parent / "attacks" / "approved"
+    approved_dir.mkdir(parents=True, exist_ok=True)
+    return approved_dir / "generated.json"
+
+
+def load_approved_records() -> list[dict[str, Any]]:
+    """Load approved generated attack records from the tracked file."""
+    approved_file = get_approved_file()
+    if not approved_file.exists():
+        return []
+    with open(approved_file) as f:
+        return json.load(f).get("attacks", [])
+
+
+def save_approved_records(attacks: list[dict[str, Any]]) -> None:
+    """Save approved generated attack records to the tracked file."""
+    with open(get_approved_file(), "w") as f:
+        json.dump({"attacks": attacks}, f, indent=2)
+        f.write("\n")
+
+
 def get_generation_log_file() -> Path:
     """Get path to the generation log (one JSON line per live run)."""
     return get_pending_file().parent / "generation_log.jsonl"
@@ -303,8 +326,7 @@ def save_pending(attacks: list[dict[str, Any]]) -> None:
 
 def load_approved_generated() -> list[Attack]:
     """Load only approved generated attacks."""
-    pending = load_pending()
-    return [attack_from_dict(a) for a in pending if a.get("status") == "approved"]
+    return [attack_from_dict(a) for a in load_approved_records()]
 
 
 def _extract_domain(email: str) -> str | None:
@@ -774,12 +796,12 @@ class AttackGenerator:
 def save_generated_attacks(attacks: list[GeneratedAttack]) -> int:
     """Save generated attacks to pending file. Returns count saved."""
     existing = load_pending()
-    existing_ids = {a["id"] for a in existing}
+    existing_ids = {a["id"] for a in existing} | {a["id"] for a in load_approved_records()}
 
     added = 0
     for attack in attacks:
         if attack.id in existing_ids:
-            print(f"Warning: {attack.id} already exists in pending, skipping")
+            print(f"Warning: {attack.id} already exists in pending or approved, skipping")
             continue
         existing.append(asdict(attack))
         existing_ids.add(attack.id)
@@ -797,7 +819,8 @@ def list_pending_attacks() -> list[dict[str, Any]]:
 def update_attack_status(attack_id: str, new_status: str, by: str | None = None) -> bool:
     """Update attack status. Returns True if found and updated.
 
-    Approval requires `by` and records approved_by and approved_at (UTC).
+    Approval requires `by`, records approved_by and approved_at (UTC), and moves the
+    record from pending.json to the tracked approved file.
     """
     if new_status == "approved" and not (by and by.strip()):
         raise ValueError("Approval requires approved_by")
@@ -808,6 +831,11 @@ def update_attack_status(attack_id: str, new_status: str, by: str | None = None)
             if new_status == "approved":
                 attack["approved_by"] = by.strip()
                 attack["approved_at"] = datetime.now(timezone.utc).isoformat()
+                approved = load_approved_records()
+                if any(a["id"] == attack_id for a in approved):
+                    raise ValueError(f"{attack_id} is already in the approved file")
+                save_approved_records(approved + [attack])
+                attacks.remove(attack)
             save_pending(attacks)
             return True
     return False

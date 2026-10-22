@@ -33,10 +33,24 @@ def test_attack_ids_are_unique() -> None:
 
 
 def test_load_attacks_only_includes_approved_generated(tmp_path, monkeypatch) -> None:
-    """Verify load_attacks only includes approved generated attacks."""
+    """Approved attacks load from the tracked approved/ folder; pending.json is never loaded."""
     import json
 
-    # Create a fake generated folder with mixed statuses
+    approved_dir = tmp_path / "approved"
+    approved_dir.mkdir()
+    (approved_dir / "generated.json").write_text(json.dumps({
+        "attacks": [{
+            "id": "GEN-APPROVED",
+            "name": "Approved Attack",
+            "category": "LLM01: Prompt Injection",
+            "setup": {},
+            "task": "Approved task",
+            "success_checks": ["canary_in_egress"],
+            "status": "approved",
+        }]
+    }))
+
+    # pending.json holds unapproved attacks, plus a stale "approved" one that must not load
     generated_dir = tmp_path / "generated"
     generated_dir.mkdir()
     pending_file = generated_dir / "pending.json"
@@ -44,7 +58,7 @@ def test_load_attacks_only_includes_approved_generated(tmp_path, monkeypatch) ->
     pending_file.write_text(json.dumps({
         "attacks": [
             {
-                "id": "GEN-APPROVED",
+                "id": "GEN-STALE-APPROVED",
                 "name": "Approved Attack",
                 "category": "LLM01: Prompt Injection",
                 "setup": {},
@@ -95,8 +109,50 @@ def test_load_attacks_only_includes_approved_generated(tmp_path, monkeypatch) ->
     ids = {a.id for a in attacks}
     assert "STATIC-001" in ids
     assert "GEN-APPROVED" in ids
+    assert "GEN-STALE-APPROVED" not in ids
     assert "GEN-PENDING" not in ids
     assert "GEN-REJECTED" not in ids
+
+
+def test_unapproved_record_in_approved_folder_raises(tmp_path, monkeypatch) -> None:
+    import json
+
+    import pytest
+
+    import redteam.attacks as attacks_module
+
+    (tmp_path / "approved").mkdir()
+    (tmp_path / "approved" / "generated.json").write_text(json.dumps({"attacks": [{
+        "id": "GEN-X", "name": "n", "category": "c", "task": "t",
+        "success_checks": [], "status": "pending",
+    }]}))
+    monkeypatch.setattr(attacks_module, "__file__", str(tmp_path / "__init__.py"))
+    with pytest.raises(ValueError, match="only approved attacks belong here"):
+        load_attacks()
+
+
+def test_tracked_approved_set_loads() -> None:
+    """A fresh clone gets the same generated attacks: the tracked set loads as expected."""
+    import json
+    from pathlib import Path
+
+    import redteam.attacks as attacks_module
+    from redteam.runner import SETUP_KEYS
+    from redteam.target.tools import CANARY_FILE_PATH
+
+    approved_file = Path(attacks_module.__file__).parent / "approved" / "generated.json"
+    records = json.loads(approved_file.read_text())["attacks"]
+    loaded = {a.id: a for a in load_attacks()}
+
+    expected_targets = {"GEN-001": "all", "GEN-002": "llm", "GEN-003": "all", "GEN-004": "llm"}
+    assert {r["id"] for r in records} == set(expected_targets)
+    for record in records:
+        attack = loaded[record["id"]]
+        assert record["status"] == "approved"
+        assert record.get("approved_by")
+        assert attack.target == expected_targets[attack.id]
+        assert set(attack.setup) <= SETUP_KEYS
+        assert CANARY_FILE_PATH not in attack.setup.get("files", {})
 
 
 def test_target_defaults_to_all_and_rejects_unknown() -> None:

@@ -44,7 +44,7 @@ def load_attacks(include_generated: bool = True) -> list[Attack]:
     """Load all attack definitions from JSON files.
 
     Args:
-        include_generated: If True, also load approved generated attacks.
+        include_generated: If True, also load approved generated attacks (approved/*.json).
     """
     attacks_dir = Path(__file__).parent
     attacks = []
@@ -56,16 +56,18 @@ def load_attacks(include_generated: bool = True) -> list[Attack]:
             for attack_data in data.get("attacks", []):
                 attacks.append(attack_from_dict(attack_data))
 
-    # Load approved generated attacks
+    # Load approved generated attacks from the tracked approved/ folder. Unapproved
+    # ones stay in the gitignored generated/pending.json and are never loaded.
     if include_generated:
-        generated_file = attacks_dir / "generated" / "pending.json"
-        if generated_file.exists():
-            with open(generated_file) as f:
+        for json_file in sorted((attacks_dir / "approved").glob("*.json")):
+            with open(json_file) as f:
                 data = json.load(f)
                 for attack_data in data.get("attacks", []):
-                    # Only load approved attacks
                     if attack_data.get("status") != "approved":
-                        continue
+                        raise ValueError(
+                            f"{json_file.name}: {attack_data['id']} has status "
+                            f"{attack_data.get('status')!r}; only approved attacks belong here"
+                        )
                     attacks.append(attack_from_dict(attack_data))
 
     return attacks

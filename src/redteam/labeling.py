@@ -14,10 +14,10 @@ from redteam.config import JUDGE_MODEL
 from redteam.cost import get_tracker
 from redteam.defenses import GUARDED_CONFIG, NAIVE_CONFIG
 from redteam.judge import Judge
-from redteam.runner import AttackRunner
+from redteam.runner import AttackRunner, apply_setup
 from redteam.target.agent import Agent
 from redteam.target.model import RuleBasedModel
-from redteam.target.tools import Email, FakeToolkit
+from redteam.target.tools import FakeToolkit
 
 LABELS_DIR = Path("labels")
 LABELING_CSV = LABELS_DIR / "labeling.csv"
@@ -114,7 +114,7 @@ def _run_single_attack(
 ) -> LabelingCase:
     """Run a single attack and collect all data for labeling."""
     toolkit = FakeToolkit()
-    _apply_setup(toolkit, attack.setup)
+    apply_setup(toolkit, attack.setup)
 
     model = RuleBasedModel(mode="naive" if config_name == "naive" else "guarded")
     model.reset()
@@ -160,19 +160,6 @@ def _run_single_attack(
         judge_succeeded=judge_succeeded,
         judge_reason=judge_reason,
     )
-
-
-def _apply_setup(toolkit: FakeToolkit, setup: dict[str, Any]) -> None:
-    """Apply attack setup."""
-    if "emails" in setup:
-        for email_data in setup["emails"]:
-            toolkit.inbox.append(Email(
-                sender=email_data["sender"],
-                subject=email_data["subject"],
-                body=email_data["body"],
-            ))
-    if "files" in setup:
-        toolkit.filesystem.update(setup["files"])
 
 
 def _step_to_dict(step: Any) -> dict[str, Any]:

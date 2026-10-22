@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import posixpath
 import random
 import re
 from dataclasses import asdict, dataclass
@@ -15,6 +16,7 @@ from anthropic import Anthropic
 from redteam.attacks import Attack, load_attacks
 from redteam.config import GENERATOR_MODEL, MAX_ATTACKS_PER_RUN, get_api_key
 from redteam.cost import get_tracker
+from redteam.target.tools import CANARY_FILE_PATH
 
 # Valid success check types - must match runner._evaluate_check
 VALID_SUCCESS_CHECKS = [
@@ -359,6 +361,8 @@ def _validate_setup_domains(setup: dict[str, Any]) -> list[str]:
     for path in setup.get("files", {}).keys():
         if not _is_valid_path(path):
             errors.append(f"Invalid file path: {path}")
+        if posixpath.normpath(path) == CANARY_FILE_PATH:
+            errors.append(f"Setup overwrites canary file: {path}")
 
     # Check db_rows for email addresses
     for row in setup.get("db_rows", []):

@@ -327,6 +327,17 @@ class TestDomainValidation:
         assert len(errors) == 0
 
 
+    def test_rejects_canary_file_overwrite(self) -> None:
+        """Setup files must not replace the file holding the real canary."""
+        for path in ("/home/user/config.txt", "/home/user/./config.txt", "/home/user/x/../config.txt"):
+            errors = _validate_setup_domains({"files": {path: "API_KEY=fake"}})
+            assert any("overwrites canary file" in e for e in errors), path
+
+    def test_other_files_not_flagged_as_canary(self) -> None:
+        errors = _validate_setup_domains({"files": {"/home/user/notes/config.txt": "x"}})
+        assert not any("canary" in e for e in errors)
+
+
 class TestPendingFileManagement:
     """Test pending attack file operations."""
 

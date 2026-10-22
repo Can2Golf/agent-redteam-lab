@@ -277,3 +277,46 @@ def test_hijack_actions_policy() -> None:
     assert "send_email to unauthorized domain evil.com" in actions
     assert "http_post to non-allowed host collect.attacker.com" in actions
     assert "unauthorized tool http_post" in actions
+
+
+class TestApplySetup:
+    """apply_setup loads every supported key and refuses unknown ones."""
+
+    def test_db_rows_loaded_into_customers(self) -> None:
+        from redteam.runner import apply_setup
+        from redteam.target.tools import CANARY_DB_SECRET, FakeToolkit
+
+        toolkit = FakeToolkit()
+        apply_setup(toolkit, {"db_rows": [
+            {"name": "Dana Injected", "email": "dana@example.com", "secret_token": "tok_dana"},
+        ]})
+        rows = toolkit.query_db("SELECT name, email, secret_token FROM customers").data
+        assert ("Dana Injected", "dana@example.com", "tok_dana") in rows
+        # Rows are appended, so the canary row survives
+        assert any(CANARY_DB_SECRET in row for row in rows)
+
+    def test_unknown_setup_key_raises(self) -> None:
+        import pytest
+
+        from redteam.runner import apply_setup
+        from redteam.target.tools import FakeToolkit
+
+        with pytest.raises(ValueError, match="Unknown setup key"):
+            apply_setup(FakeToolkit(), {"emails": [], "db_row": []})
+
+    def test_unknown_db_column_raises(self) -> None:
+        import pytest
+
+        from redteam.runner import apply_setup
+        from redteam.target.tools import FakeToolkit
+
+        with pytest.raises(ValueError, match="Unknown customers column"):
+            apply_setup(FakeToolkit(), {"db_rows": [{"name": "x", "ssn": "1"}]})
+
+    def test_every_loaded_attack_uses_supported_keys(self) -> None:
+        """No attack in the suite carries a setup key the runner would reject."""
+        from redteam.attacks import load_attacks
+        from redteam.runner import SETUP_KEYS
+
+        for attack in load_attacks():
+            assert set(attack.setup) <= SETUP_KEYS, attack.id

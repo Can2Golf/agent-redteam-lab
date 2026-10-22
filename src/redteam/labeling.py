@@ -54,8 +54,8 @@ def run_sampling(
     """
     random.seed(seed)
     attacks = load_attacks()
-    # Filter out benign tasks
-    attacks = [a for a in attacks if not a.id.startswith("BEN")]
+    # Filter out benign tasks and attacks the rule-based stand-in doesn't run
+    attacks = [a for a in attacks if not a.id.startswith("BEN") and a.target != "llm"]
 
     tracker = get_tracker()
     start_cost = tracker.total_cost

@@ -7,13 +7,13 @@ import posixpath
 import random
 import re
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from anthropic import Anthropic
 
-from redteam.attacks import Attack, load_attacks
+from redteam.attacks import Attack, attack_from_dict, load_attacks
 from redteam.config import GENERATOR_MODEL, MAX_ATTACKS_PER_RUN, get_api_key
 from redteam.cost import get_tracker
 from redteam.target.tools import CANARY_FILE_PATH
@@ -249,6 +249,9 @@ class GeneratedAttack:
     mode: str = "black-box"  # black-box or white-box
     date: str = ""
     based_on: str | None = None  # ID of attack this is a variation of
+    target: str = "all"  # "all" or "llm" (needs a real LLM; skipped by the stand-in)
+    approved_by: str | None = None
+    approved_at: str | None = None
 
 
 @dataclass
@@ -276,6 +279,11 @@ def get_pending_file() -> Path:
     return generated_dir / "pending.json"
 
 
+def get_generation_log_file() -> Path:
+    """Get path to the generation log (one JSON line per live run)."""
+    return get_pending_file().parent / "generation_log.jsonl"
+
+
 def load_pending() -> list[dict[str, Any]]:
     """Load pending attacks from file."""
     pending_file = get_pending_file()
@@ -296,18 +304,7 @@ def save_pending(attacks: list[dict[str, Any]]) -> None:
 def load_approved_generated() -> list[Attack]:
     """Load only approved generated attacks."""
     pending = load_pending()
-    approved = [a for a in pending if a.get("status") == "approved"]
-    return [
-        Attack(
-            id=a["id"],
-            name=a["name"],
-            category=a["category"],
-            setup=a.get("setup", {}),
-            task=a["task"],
-            success_checks=a["success_checks"],
-        )
-        for a in approved
-    ]
+    return [attack_from_dict(a) for a in pending if a.get("status") == "approved"]
 
 
 def _extract_domain(email: str) -> str | None:
@@ -389,6 +386,31 @@ class AttackGenerator:
         self.dry_run = dry_run
         self.white_box = white_box
         self._tracker = get_tracker()
+        self._warnings: list[str] = []
+
+    def _warn(self, message: str) -> None:
+        """Print a validation warning and keep it for the run log."""
+        print(f"Warning: {message}")
+        self._warnings.append(message)
+
+    def _log_run(
+        self, requested: int, returned: int, refusal_count: int, stop_reason: str | None,
+        error: str | None = None,
+    ) -> None:
+        """Append this run's outcome and validation warnings to the generation log."""
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "model": self.model,
+            "mode": self.mode,
+            "requested": requested,
+            "returned": returned,
+            "refusal_count": refusal_count,
+            "stop_reason": stop_reason,
+            "warnings": self._warnings,
+            "error": error,
+        }
+        with open(get_generation_log_file(), "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
 
     @property
     def client(self) -> Anthropic:
@@ -467,6 +489,8 @@ class AttackGenerator:
                 attacks=[], refusal_count=0, model=self.model, mode=self.mode
             )
 
+        self._warnings = []
+
         # Call the API with tool_use
         response = self.client.messages.create(
             model=self.model,
@@ -488,6 +512,7 @@ class AttackGenerator:
         refusal_count = 0
         if response.stop_reason == "refusal":
             refusal_count = 1
+            self._log_run(count, 0, refusal_count, response.stop_reason)
             return GenerationResult(
                 attacks=[],
                 refusal_count=refusal_count,
@@ -496,7 +521,12 @@ class AttackGenerator:
             )
 
         # Parse attacks from tool_use blocks
-        attacks = self._parse_attacks(response, based_on=from_attack)
+        try:
+            attacks = self._parse_attacks(response, based_on=from_attack)
+        except GeneratorError as e:
+            self._log_run(count, 0, refusal_count, response.stop_reason, error=str(e))
+            raise
+        self._log_run(count, len(attacks), refusal_count, response.stop_reason)
 
         return GenerationResult(
             attacks=attacks,
@@ -669,36 +699,36 @@ class AttackGenerator:
         required = ["id", "name", "category", "task", "success_checks"]
         for field in required:
             if field not in data:
-                print(f"Warning: Skipping attack missing '{field}'")
+                self._warn(f"Skipping attack missing '{field}'")
                 return None
 
         attack_id = data["id"]
 
         # Unique ID within this batch
         if attack_id in seen_ids:
-            print(f"Warning: Duplicate ID {attack_id}, skipping")
+            self._warn(f"Duplicate ID {attack_id}, skipping")
             return None
 
         # Valid category
         if data["category"] not in VALID_CATEGORIES:
-            print(f"Warning: Invalid category {data['category']}, skipping")
+            self._warn(f"Invalid category {data['category']}, skipping")
             return None
 
         # Valid success checks
         checks = data["success_checks"]
         if not isinstance(checks, list) or len(checks) == 0:
-            print(f"Warning: Empty success_checks for {attack_id}, skipping")
+            self._warn(f"Empty success_checks for {attack_id}, skipping")
             return None
 
         valid_checks = [c for c in checks if c in VALID_SUCCESS_CHECKS]
         if not valid_checks:
-            print(f"Warning: No valid success_checks for {attack_id}, skipping")
+            self._warn(f"No valid success_checks for {attack_id}, skipping")
             return None
 
         # Check for duplicate task
         task_normalized = data["task"].strip().lower()
         if task_normalized in existing_tasks:
-            print(f"Warning: Duplicate task for {attack_id}, skipping")
+            self._warn(f"Duplicate task for {attack_id}, skipping")
             return None
 
         # Validate setup domains and paths
@@ -706,8 +736,8 @@ class AttackGenerator:
         domain_errors = _validate_setup_domains(setup)
         if domain_errors:
             for err in domain_errors:
-                print(f"Warning: {attack_id}: {err}")
-            print(f"Warning: Skipping {attack_id} due to invalid domains/paths")
+                self._warn(f"{attack_id}: {err}")
+            self._warn(f"Skipping {attack_id} due to invalid domains/paths")
             return None
 
         return GeneratedAttack(
@@ -764,12 +794,20 @@ def list_pending_attacks() -> list[dict[str, Any]]:
     return [a for a in load_pending() if a.get("status") == "pending"]
 
 
-def update_attack_status(attack_id: str, new_status: str) -> bool:
-    """Update attack status. Returns True if found and updated."""
+def update_attack_status(attack_id: str, new_status: str, by: str | None = None) -> bool:
+    """Update attack status. Returns True if found and updated.
+
+    Approval requires `by` and records approved_by and approved_at (UTC).
+    """
+    if new_status == "approved" and not (by and by.strip()):
+        raise ValueError("Approval requires approved_by")
     attacks = load_pending()
     for attack in attacks:
         if attack["id"] == attack_id:
             attack["status"] = new_status
+            if new_status == "approved":
+                attack["approved_by"] = by.strip()
+                attack["approved_at"] = datetime.now(timezone.utc).isoformat()
             save_pending(attacks)
             return True
     return False

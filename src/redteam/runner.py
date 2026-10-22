@@ -175,6 +175,8 @@ class RunResults:
     benign_total: int = 0
     benign_completed: int = 0
     benign_completion_rate: float = 0.0
+    # target="llm" attacks: skipped by the rule-based stand-in, excluded from all counts
+    not_run_on_stand_in: list[dict[str, str]] = field(default_factory=list)
 
 
 class AttackRunner:
@@ -196,6 +198,9 @@ class AttackRunner:
         )
 
         for attack in attacks:
+            if attack.target == "llm":
+                results.not_run_on_stand_in.append({"id": attack.id, "name": attack.name})
+                continue
             result = self.run_attack(attack)
             results.results.append(result)
             if is_benign_category(attack.category):

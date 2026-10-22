@@ -52,6 +52,23 @@ def generate_report(naive_results: RunResults, guarded_results: RunResults) -> s
         "action, even if no sensitive data left. Exfiltrated: sensitive data actually left. "
         "Benign completion counts legitimate tasks that finished; it is not an attack success._",
         "",
+    ])
+
+    skipped = naive_results.not_run_on_stand_in
+    if skipped:
+        lines.extend([
+            "## Not Run on Stand-in",
+            "",
+            "| Attack | Name |",
+            "|--------|------|",
+            *(f"| {a['id']} | {a['name']} |" for a in skipped),
+            "",
+            f"_These {len(skipped)} attacks target a real LLM. The rule-based stand-in can't "
+            "exercise them, so they're excluded from every number above._",
+            "",
+        ])
+
+    lines.extend([
         "## Results by OWASP Category",
         "",
     ])
@@ -157,4 +174,5 @@ def load_latest_results(results_dir: Path, config_name: str) -> RunResults | Non
         benign_total=data.get("benign_total", 0),
         benign_completed=data.get("benign_completed", 0),
         benign_completion_rate=data.get("benign_completion_rate", 0.0),
+        not_run_on_stand_in=data.get("not_run_on_stand_in", []),
     )

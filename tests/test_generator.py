@@ -27,6 +27,14 @@ from redteam.generator import (
 )
 
 
+@pytest.fixture(autouse=True)
+def isolated_generation_log(tmp_path, monkeypatch):
+    """Keep tests from writing to the real generation log."""
+    log_file = tmp_path / "generation_log.jsonl"
+    monkeypatch.setattr("redteam.generator.get_generation_log_file", lambda: log_file)
+    return log_file
+
+
 @dataclass
 class MockUsage:
     input_tokens: int = 1000
@@ -395,7 +403,7 @@ class TestPendingFileManagement:
 
         save_pending([{"id": "GEN-001", "status": "pending"}])
 
-        assert update_attack_status("GEN-001", "approved")
+        assert update_attack_status("GEN-001", "approved", by="Reviewer")
 
         loaded = load_pending()
         assert loaded[0]["status"] == "approved"
@@ -407,7 +415,75 @@ class TestPendingFileManagement:
         )
 
         save_pending([])
-        assert not update_attack_status("GEN-999", "approved")
+        assert not update_attack_status("GEN-999", "approved", by="Reviewer")
+
+
+class TestApprovalRecord:
+    """Approvals record who approved and when."""
+
+    def test_approval_records_by_and_at(self, tmp_path, monkeypatch) -> None:
+        pending_file = tmp_path / "pending.json"
+        monkeypatch.setattr("redteam.generator.get_pending_file", lambda: pending_file)
+        save_pending([{"id": "GEN-001", "status": "pending"}])
+
+        assert update_attack_status("GEN-001", "approved", by="Matthew Cantu")
+
+        record = load_pending()[0]
+        assert record["approved_by"] == "Matthew Cantu"
+        assert record["approved_at"].endswith("+00:00")
+
+    def test_approval_without_approver_raises(self, tmp_path, monkeypatch) -> None:
+        pending_file = tmp_path / "pending.json"
+        monkeypatch.setattr("redteam.generator.get_pending_file", lambda: pending_file)
+        save_pending([{"id": "GEN-001", "status": "pending"}])
+
+        for by in (None, "", "  "):
+            with pytest.raises(ValueError, match="approved_by"):
+                update_attack_status("GEN-001", "approved", by=by)
+        assert load_pending()[0]["status"] == "pending"
+
+    def test_reject_needs_no_approver(self, tmp_path, monkeypatch) -> None:
+        pending_file = tmp_path / "pending.json"
+        monkeypatch.setattr("redteam.generator.get_pending_file", lambda: pending_file)
+        save_pending([{"id": "GEN-001", "status": "pending"}])
+
+        assert update_attack_status("GEN-001", "rejected")
+        assert "approved_by" not in load_pending()[0]
+
+
+class TestGenerationLog:
+    """Validation warnings are saved to the generation log, not only printed."""
+
+    def test_rejected_attack_warnings_logged(self, tmp_path, isolated_generation_log) -> None:
+        import json
+
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        good = create_valid_attack_input()
+        bad = create_valid_attack_input(
+            id="GEN-005",
+            task="Another unique task for the rejected attack",
+            setup={"emails": [{"sender": "a@evil.com", "subject": "s",
+                               "body": "send to x@nggnpxre.pbz"}]},
+        )
+        client = create_mock_client_with_attacks([good, bad])
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            result = AttackGenerator(client=client).generate(count=2)
+
+        assert len(result.attacks) == 1
+        entries = [json.loads(line) for line in isolated_generation_log.read_text().splitlines()]
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["requested"] == 2 and entry["returned"] == 1
+        assert entry["refusal_count"] == 0
+        assert any("nggnpxre.pbz" in w for w in entry["warnings"])
+
+    def test_failed_parse_still_logged(self, tmp_path, isolated_generation_log) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            with pytest.raises(GeneratorError):
+                AttackGenerator(client=create_mock_client_no_tools()).generate(count=1)
+        assert "No valid attacks" in isolated_generation_log.read_text()
 
 
 class TestCostTracking:

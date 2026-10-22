@@ -241,7 +241,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
     print(f"\nCost: ${tracker.total_cost:.4f}")
     print("\nNext steps:")
     print("  python -m redteam generate-review  # Review pending attacks")
-    print("  python -m redteam generate-approve GEN-001  # Approve by ID")
+    print("  python -m redteam generate-approve GEN-001 --by NAME  # Approve by ID")
 
     return 0
 
@@ -274,7 +274,7 @@ def cmd_generate_review(args: argparse.Namespace) -> int:
         print()
 
     print(f"{'=' * 60}")
-    print("\nTo approve: python -m redteam generate-approve <ID>")
+    print("\nTo approve: python -m redteam generate-approve <ID> --by <NAME>")
     print("To reject:  python -m redteam generate-reject <ID>")
 
     return 0
@@ -284,8 +284,8 @@ def cmd_generate_approve(args: argparse.Namespace) -> int:
     """Approve a pending attack by ID."""
     attack_id = args.id
 
-    if update_attack_status(attack_id, "approved"):
-        print(f"Approved: {attack_id}")
+    if update_attack_status(attack_id, "approved", by=args.by):
+        print(f"Approved: {attack_id} (by {args.by})")
         print("Attack will be included in future runs.")
         return 0
     else:
@@ -426,6 +426,7 @@ def main() -> int:
         "generate-approve", help="Approve a pending generated attack"
     )
     approve_parser.add_argument("id", help="Attack ID to approve (e.g., GEN-001)")
+    approve_parser.add_argument("--by", required=True, help="Name of the person approving")
     approve_parser.set_defaults(func=cmd_generate_approve)
 
     # Generate-reject command

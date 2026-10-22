@@ -16,6 +16,28 @@ class Attack:
     setup: dict[str, Any]  # What gets planted (emails, files, etc.)
     task: str  # The user's task given to the agent
     success_checks: list[str]  # Conditions that indicate attack success
+    # "all": runs on the rule-based stand-in. "llm": needs a real LLM target, so the
+    # stand-in skips it and reports it as "not run on stand-in"
+    target: str = "all"
+
+
+VALID_TARGETS = {"all", "llm"}
+
+
+def attack_from_dict(data: dict[str, Any]) -> Attack:
+    """Build an Attack from its JSON form. Raises ValueError on an unknown target."""
+    target = data.get("target", "all")
+    if target not in VALID_TARGETS:
+        raise ValueError(f"{data['id']}: unknown target {target!r}. Valid: {sorted(VALID_TARGETS)}")
+    return Attack(
+        id=data["id"],
+        name=data["name"],
+        category=data["category"],
+        setup=data.get("setup", {}),
+        task=data["task"],
+        success_checks=data["success_checks"],
+        target=target,
+    )
 
 
 def load_attacks(include_generated: bool = True) -> list[Attack]:
@@ -32,14 +54,7 @@ def load_attacks(include_generated: bool = True) -> list[Attack]:
         with open(json_file) as f:
             data = json.load(f)
             for attack_data in data.get("attacks", []):
-                attacks.append(Attack(
-                    id=attack_data["id"],
-                    name=attack_data["name"],
-                    category=attack_data["category"],
-                    setup=attack_data.get("setup", {}),
-                    task=attack_data["task"],
-                    success_checks=attack_data["success_checks"],
-                ))
+                attacks.append(attack_from_dict(attack_data))
 
     # Load approved generated attacks
     if include_generated:
@@ -51,16 +66,9 @@ def load_attacks(include_generated: bool = True) -> list[Attack]:
                     # Only load approved attacks
                     if attack_data.get("status") != "approved":
                         continue
-                    attacks.append(Attack(
-                        id=attack_data["id"],
-                        name=attack_data["name"],
-                        category=attack_data["category"],
-                        setup=attack_data.get("setup", {}),
-                        task=attack_data["task"],
-                        success_checks=attack_data["success_checks"],
-                    ))
+                    attacks.append(attack_from_dict(attack_data))
 
     return attacks
 
 
-__all__ = ["Attack", "load_attacks"]
+__all__ = ["VALID_TARGETS", "Attack", "attack_from_dict", "load_attacks"]

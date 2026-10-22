@@ -39,6 +39,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     print(f"\nResults saved to: {filepath}")
     print(f"Attack success: {results.successful_attacks}/{results.total_attacks} ({results.success_rate:.1%})")
+    print(f"Hijacked: {results.hijacked_attacks}/{results.total_attacks}")
+    print(f"Exfiltrated: {results.exfiltrated_attacks}/{results.total_attacks}")
     print(
         f"Benign completion: {results.benign_completed}/{results.benign_total} "
         f"({results.benign_completion_rate:.1%})"

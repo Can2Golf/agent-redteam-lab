@@ -9,7 +9,8 @@ from redteam.runner import RunResults, is_benign_category
 
 ATTACK_LEGEND = (
     "_Attack Conditions Met: the attack achieved that goal. "
-    "Not Met: blocked or never attempted._"
+    "Not Met: blocked or never attempted. "
+    "Hijacked: agent executed the injected forbidden action. Exfiltrated: sensitive data left._"
 )
 TASK_LEGEND = (
     "_Task Checks Met: the legitimate task completed that step. "
@@ -21,6 +22,10 @@ def _checks(names: list[str]) -> str:
     return ", ".join(names) or "-"
 
 
+def _yes_no(flag: bool) -> str:
+    return "yes" if flag else "no"
+
+
 def generate_report(naive_results: RunResults, guarded_results: RunResults) -> str:
     """Generate a Markdown comparison report."""
     lines = [
@@ -30,18 +35,22 @@ def generate_report(naive_results: RunResults, guarded_results: RunResults) -> s
         "",
         "## Summary",
         "",
-        "| Config | Attack Success | Attack Success Rate | Benign Completed | Benign Completion Rate |",
-        "|--------|----------------|---------------------|------------------|------------------------|",
+        "| Config | Attack Success | Attack Success Rate | Hijacked | Exfiltrated "
+        "| Benign Completed | Benign Completion Rate |",
+        "|--------|----------------|---------------------|----------|-------------"
+        "|------------------|------------------------|",
     ]
     for label, r in (("Naive", naive_results), ("Guarded", guarded_results)):
         lines.append(
             f"| {label} | {r.successful_attacks}/{r.total_attacks} | {r.success_rate:.1%} "
+            f"| {r.hijacked_attacks}/{r.total_attacks} | {r.exfiltrated_attacks}/{r.total_attacks} "
             f"| {r.benign_completed}/{r.benign_total} | {r.benign_completion_rate:.1%} |"
         )
     lines.extend([
         "",
-        "_Attack success counts attacks only. Benign completion counts legitimate tasks that "
-        "finished; it is not an attack success._",
+        "_Attack success counts attacks only. Hijacked: the agent executed an injected forbidden "
+        "action, even if no sensitive data left. Exfiltrated: sensitive data actually left. "
+        "Benign completion counts legitimate tasks that finished; it is not an attack success._",
         "",
         "## Results by OWASP Category",
         "",
@@ -73,22 +82,26 @@ def generate_report(naive_results: RunResults, guarded_results: RunResults) -> s
         benign = is_benign_category(naive_r.category)
 
         if benign:
-            header = "| Config | Result | Task Checks Met | Task Checks Not Met |"
+            columns = ["Config", "Result", "Task Checks Met", "Task Checks Not Met"]
             yes, no, legend = "COMPLETED", "NOT COMPLETED", TASK_LEGEND
         else:
-            header = "| Config | Result | Attack Conditions Met | Attack Conditions Not Met |"
+            columns = ["Config", "Result", "Hijacked", "Exfiltrated",
+                       "Attack Conditions Met", "Attack Conditions Not Met"]
             yes, no, legend = "PASS", "BLOCKED", ATTACK_LEGEND
 
         lines.append(f"### {naive_r.attack_id}: {naive_r.attack_name}")
         lines.append("")
         lines.append(f"**Category:** {naive_r.category}")
         lines.append("")
-        lines.append(header)
-        lines.append("|--------|--------|------|----------|")
+        lines.append("| " + " | ".join(columns) + " |")
+        lines.append("|" + "|".join("---" for _ in columns) + "|")
         rows = [("Naive", naive_r)] + ([("Guarded", guarded_r)] if guarded_r else [])
         for label, r in rows:
-            status = yes if r.success else no
-            lines.append(f"| {label} | {status} | {_checks(r.checks_passed)} | {_checks(r.checks_failed)} |")
+            cells = [label, yes if r.success else no]
+            if not benign:
+                cells += [_yes_no(r.hijacked), _yes_no(r.exfiltrated)]
+            cells += [_checks(r.checks_passed), _checks(r.checks_failed)]
+            lines.append("| " + " | ".join(cells) + " |")
         lines.append("")
         lines.append(legend)
         lines.append("")
@@ -139,6 +152,8 @@ def load_latest_results(results_dir: Path, config_name: str) -> RunResults | Non
         success_rate=data["success_rate"],
         results=[AttackResult(**r) for r in data["results"]],
         by_category=data["by_category"],
+        hijacked_attacks=data.get("hijacked_attacks", 0),
+        exfiltrated_attacks=data.get("exfiltrated_attacks", 0),
         benign_total=data.get("benign_total", 0),
         benign_completed=data.get("benign_completed", 0),
         benign_completion_rate=data.get("benign_completion_rate", 0.0),

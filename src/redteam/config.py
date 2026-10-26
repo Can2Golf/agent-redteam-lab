@@ -51,6 +51,7 @@ class ProviderConfig:
     timeout: float = REQUEST_TIMEOUT
     max_retries: int = MAX_RETRIES
     dry_run: bool = False
+    temperature: float = 0.0  # Deterministic by default; recorded for every live run
 
 
 def get_api_key() -> str:

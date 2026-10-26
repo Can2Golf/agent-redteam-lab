@@ -23,6 +23,7 @@ from redteam.labeling import (
     run_sampling,
     score_labels,
 )
+from redteam.live import DEFAULT_REPEATS, dry_run_report
 from redteam.report import generate_report, load_latest_results
 from redteam.runner import AttackRunner, save_results
 
@@ -47,6 +48,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
 
     return 0
+
+
+def cmd_live(args: argparse.Namespace) -> int:
+    """Live runs against the real target model."""
+    if args.dry_run:
+        print(dry_run_report(repeats=args.repeats))
+        return 0
+    # Execution lands in a later step (5b pilot, 5c full run).
+    print("Live execution is not implemented yet; run with --dry-run (Step 5a).")
+    return 1
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -327,6 +338,21 @@ def main() -> int:
         help="Output directory for results (default: results)",
     )
     run_parser.set_defaults(func=cmd_run)
+
+    # Live command
+    live_parser = subparsers.add_parser("live", help="Live runs against the real target model")
+    live_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Estimate cost and show the plan without making any API call",
+    )
+    live_parser.add_argument(
+        "--repeats",
+        type=int,
+        default=DEFAULT_REPEATS,
+        help=f"Repeats per task per config (default: {DEFAULT_REPEATS})",
+    )
+    live_parser.set_defaults(func=cmd_live)
 
     # Report command
     report_parser = subparsers.add_parser("report", help="Generate comparison report")

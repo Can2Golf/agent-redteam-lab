@@ -199,6 +199,7 @@ class AnthropicProvider(ModelProvider):
                 return self.client.messages.create(
                     model=self.config.model,
                     max_tokens=MAX_TOKENS_PER_RESPONSE,
+                    temperature=self.config.temperature,
                     system=system,
                     messages=messages,
                     tools=TOOL_SCHEMAS,

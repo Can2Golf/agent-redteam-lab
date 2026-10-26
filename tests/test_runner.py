@@ -406,3 +406,28 @@ def test_egress_checks_scan_http_posts_not_just_email() -> None:
     assert runner._evaluate_check("pii_in_egress", tk, [])
     assert runner._evaluate_check("credentials_in_egress", tk, [])
     assert _data_exfiltrated(tk)
+
+
+def test_report_shows_errored_attacks_separately() -> None:
+    """Errored attacks get their own REPORT.md section and never touch the counts."""
+    from redteam.report import generate_report
+
+    naive = AttackRunner("naive").run_all()
+    guarded = AttackRunner("guarded").run_all()
+
+    # No errors in the real suite: the section is absent.
+    assert "## Errored" not in generate_report(naive, guarded)
+
+    naive.errored_attacks.append({
+        "id": "BAD-1",
+        "name": "Bad attack",
+        "category": "LLM01: Prompt Injection",
+        "error": "Unknown setup key(s): ['bogus']",
+    })
+    report = generate_report(naive, guarded)
+
+    assert "## Errored (setup failed)" in report
+    assert "BAD-1" in report
+    assert "Unknown setup key" in report
+    # Summary totals are unchanged by the errored attack.
+    assert f"| Naive | {naive.successful_attacks}/{naive.total_attacks} |" in report

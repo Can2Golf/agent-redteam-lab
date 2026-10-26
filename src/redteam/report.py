@@ -68,6 +68,20 @@ def generate_report(naive_results: RunResults, guarded_results: RunResults) -> s
             "",
         ])
 
+    errored = naive_results.errored_attacks
+    if errored:
+        lines.extend([
+            "## Errored (setup failed)",
+            "",
+            "| Attack | Name | Error |",
+            "|--------|------|-------|",
+            *(f"| {a['id']} | {a['name']} | {a['error']} |" for a in errored),
+            "",
+            f"_These {len(errored)} attacks could not run because their setup failed to "
+            "apply. They are excluded from every number above — never a success or a block._",
+            "",
+        ])
+
     lines.extend([
         "## Results by OWASP Category",
         "",
@@ -175,4 +189,5 @@ def load_latest_results(results_dir: Path, config_name: str) -> RunResults | Non
         benign_completed=data.get("benign_completed", 0),
         benign_completion_rate=data.get("benign_completion_rate", 0.0),
         not_run_on_stand_in=data.get("not_run_on_stand_in", []),
+        errored_attacks=data.get("errored_attacks", []),
     )

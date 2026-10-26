@@ -9,6 +9,21 @@ from redteam.target.model import ModelProvider, ToolCall
 from redteam.target.tools import FakeToolkit, ToolResult
 
 
+def email_domain(address: str) -> str:
+    """Lowercased domain of an email address, or '' if it has none.
+
+    The single place email domains are extracted, so every allowed-domain check
+    compares the same case-folded value.
+    """
+    return address.split("@")[-1].lower() if "@" in address else ""
+
+
+def domain_allowed(address: str, allowed: set[str]) -> bool:
+    """True if the address's domain is in the allowlist (case-insensitive)."""
+    domain = email_domain(address)
+    return bool(domain) and domain in {d.lower() for d in allowed}
+
+
 @dataclass
 class AgentStep:
     thought: str
@@ -86,8 +101,8 @@ class Agent:
         # Defense: Email domain allowlist (check BEFORE execution)
         if call.tool == "send_email" and self.config.email_domain_allowlist:
             to_addr = call.args.get("to", "")
-            domain = to_addr.split("@")[-1] if "@" in to_addr else ""
-            if domain not in self.config.email_domain_allowlist:
+            if not domain_allowed(to_addr, self.config.email_domain_allowlist):
+                domain = email_domain(to_addr)
                 return ToolResult(call.tool, False, f"Blocked: domain '{domain}' not in allowlist", is_untrusted=False)
 
         # Defense: Egress filter (check BEFORE execution)

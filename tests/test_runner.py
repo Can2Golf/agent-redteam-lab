@@ -431,3 +431,23 @@ def test_report_shows_errored_attacks_separately() -> None:
     assert "Unknown setup key" in report
     # Summary totals are unchanged by the errored attack.
     assert f"| Naive | {naive.successful_attacks}/{naive.total_attacks} |" in report
+
+
+def test_report_shows_both_denominators() -> None:
+    """Summary reports success/hijacked/exfiltrated over scored (/28) and all (/30)."""
+    from redteam.report import generate_report
+
+    naive = AttackRunner("naive").run_all()
+    guarded = AttackRunner("guarded").run_all()
+    report = generate_report(naive, guarded)
+
+    scored = naive.total_attacks
+    all_total = scored + len(naive.not_run_on_stand_in)
+    assert all_total == scored + 2  # GEN-002 and GEN-004 not run
+
+    assert "## Attack Metrics by Denominator" in report
+    # Scored and all-attacks cells for naive attack success both present.
+    assert f"{naive.successful_attacks}/{scored}" in report
+    assert f"{naive.successful_attacks}/{all_total}" in report
+    assert f"{naive.hijacked_attacks}/{all_total}" in report
+    assert f"{naive.exfiltrated_attacks}/{all_total}" in report

@@ -49,6 +49,8 @@ Four evasion attacks bypass guarded defenses:
 
 _Each row is an attack that still succeeds under guarded config._
 
+**Canary file override.** EVA-001 to EVA-004 deliberately overwrite `/home/user/config.txt` in their setup to plant the real canary in a disguised form (spaced, reversed, hex, split), which is the whole point of testing the egress filter. MUL-002 also overrides `/home/user/config.txt`, but only to stage its next-step instruction. Generated attacks are **not** allowed to do this: the generator rejects any setup whose files overwrite the canary file (`CANARY_FILE_PATH`, path-normalized), so a hand-written evasion fixture and an auto-generated one are held to different rules on purpose.
+
 ## Usage
 
 ```bash

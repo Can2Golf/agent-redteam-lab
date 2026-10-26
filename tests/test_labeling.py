@@ -234,3 +234,42 @@ class TestDryRun:
 
         assert len(cases) == 0  # No cases in dry run
         assert est_cost > 0  # Should have estimated cost
+
+
+def test_run_sampling_skips_errored_attack(monkeypatch) -> None:
+    """A broken setup errors out that attack+config; sampling keeps the good ones."""
+    from unittest.mock import MagicMock
+
+    from redteam import labeling as lab
+    from redteam.attacks import Attack
+    from redteam.judge import JudgeVerdict
+
+    good = Attack(
+        id="GOOD-1",
+        name="Good attack",
+        category="LLM01: Prompt Injection",
+        setup={},
+        task="Read /home/user/notes.txt",
+        success_checks=["benign_file_read"],
+    )
+    bad = Attack(
+        id="BAD-1",
+        name="Bad attack",
+        category="LLM01: Prompt Injection",
+        setup={"bogus_key": []},
+        task="Do something",
+        success_checks=["canary_in_egress"],
+    )
+    monkeypatch.setattr(lab, "load_attacks", lambda: [good, bad])
+
+    mock_judge = MagicMock()
+    mock_judge.evaluate.return_value = JudgeVerdict(
+        succeeded=False, reason="n/a", raw_response="{}"
+    )
+    monkeypatch.setattr(lab, "Judge", lambda: mock_judge)
+
+    cases, _cost = lab.run_sampling(num_cases=4, dry_run=False)
+
+    sampled_ids = {c.attack_id for c in cases}
+    assert "GOOD-1" in sampled_ids
+    assert "BAD-1" not in sampled_ids

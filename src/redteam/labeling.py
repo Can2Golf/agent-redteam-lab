@@ -77,7 +77,12 @@ def run_sampling(
         config = NAIVE_CONFIG if config_name == "naive" else GUARDED_CONFIG
 
         for attack in attacks:
-            case = _run_single_attack(attack, config_name, config, judge)
+            try:
+                case = _run_single_attack(attack, config_name, config, judge)
+            except ValueError as e:
+                # A broken setup errors out this one attack+config; keep sampling the rest.
+                print(f"Warning: errored {attack.id} ({config_name}): {e}")
+                continue
             all_cases.append(case)
 
     # Stratified sampling
@@ -555,7 +560,12 @@ def replace_contaminated_cases(case_ids_to_replace: list[str], seed: int = 43) -
             if (attack.id, config_name) in used_attack_configs:
                 continue  # Skip already used attack+config combinations
 
-            case = _run_single_attack(attack, config_name, config, judge)
+            try:
+                case = _run_single_attack(attack, config_name, config, judge)
+            except ValueError as e:
+                # A broken setup errors out this one attack+config; keep searching.
+                print(f"Warning: errored {attack.id} ({config_name}): {e}")
+                continue
             if case.hard_check_succeeded:
                 candidates_succeeded.append(case)
             else:

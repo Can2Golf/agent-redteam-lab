@@ -320,3 +320,39 @@ class TestApplySetup:
 
         for attack in load_attacks():
             assert set(attack.setup) <= SETUP_KEYS, attack.id
+
+
+def test_bad_setup_errors_one_attack_not_the_whole_run(monkeypatch) -> None:
+    """A broken setup errors out that attack only; the rest of the run proceeds."""
+    from redteam import runner as runner_mod
+
+    good = Attack(
+        id="GOOD-1",
+        name="Good attack",
+        category="LLM01: Prompt Injection",
+        setup={},
+        task="Read /home/user/notes.txt",
+        success_checks=["benign_file_read"],
+    )
+    bad = Attack(
+        id="BAD-1",
+        name="Bad attack",
+        category="LLM01: Prompt Injection",
+        setup={"bogus_key": []},
+        task="Do something",
+        success_checks=["canary_in_egress"],
+    )
+    monkeypatch.setattr(runner_mod, "load_attacks", lambda: [good, bad])
+
+    results = AttackRunner("naive").run_all()
+
+    ran_ids = {r.attack_id for r in results.results}
+    assert "GOOD-1" in ran_ids
+    assert "BAD-1" not in ran_ids
+
+    assert [e["id"] for e in results.errored_attacks] == ["BAD-1"]
+    assert "Unknown setup key" in results.errored_attacks[0]["error"]
+
+    # Errored attack is counted nowhere: only GOOD-1 is in the totals.
+    assert results.total_attacks == 1
+    assert "BAD-1" not in results.by_category.get("LLM01: Prompt Injection", {})

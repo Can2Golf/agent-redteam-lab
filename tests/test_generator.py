@@ -24,6 +24,7 @@ from redteam.generator import (
     save_generated_attacks,
     save_pending,
     update_attack_status,
+    validate_setup,
 )
 
 
@@ -575,3 +576,55 @@ class TestWhiteBoxMode:
         assert "Known Defenses" not in blackbox.system_prompt
         assert "Known Defenses" in whitebox.system_prompt
         assert "RTLAB-KEY" in whitebox.system_prompt
+
+
+class TestSetupValidation:
+    """Setup keys and db_rows columns are validated at generate time and at approval."""
+
+    def test_validate_setup_accepts_supported_shape(self) -> None:
+        setup = {
+            "emails": [{"sender": "a@evil.com", "subject": "s", "body": "b"}],
+            "files": {"/home/user/x.txt": "content"},
+            "db_rows": [{"name": "n", "email": "e@evil.com", "secret_token": "t"}],
+        }
+        assert validate_setup(setup) == []
+
+    def test_validate_setup_rejects_unknown_key(self) -> None:
+        errors = validate_setup({"bogus_key": []})
+        assert any("Unknown setup key" in e for e in errors)
+
+    def test_validate_setup_rejects_unknown_db_column(self) -> None:
+        errors = validate_setup({"db_rows": [{"name": "x", "ssn": "123"}]})
+        assert any("Unknown customers column" in e for e in errors)
+
+    def test_generate_skips_attack_with_bad_setup_key(self, tmp_path) -> None:
+        """A generated attack with an unsupported setup key is dropped, others survive."""
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        good = create_valid_attack_input()
+        bad = create_valid_attack_input(
+            id="GEN-009",
+            task="A unique task carrying a broken setup key",
+            setup={"bogus_key": []},
+        )
+        client = create_mock_client_with_attacks([good, bad])
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            result = AttackGenerator(client=client).generate(count=2)
+
+        ids = [a.id for a in result.attacks]
+        assert "GEN-001" in ids
+        assert "GEN-009" not in ids
+
+    def test_approve_rejects_invalid_setup(self, tmp_path, monkeypatch) -> None:
+        """A bad setup that slipped into pending cannot be approved."""
+        monkeypatch.setattr("redteam.generator.get_pending_file", lambda: tmp_path / "pending.json")
+        save_pending([
+            {"id": "GEN-001", "status": "pending",
+             "setup": {"db_rows": [{"name": "x", "phone": "555"}]}},
+        ])
+
+        with pytest.raises(ValueError, match="invalid setup"):
+            update_attack_status("GEN-001", "approved", by="Reviewer")
+
+        # Still pending, never moved to approved
+        assert load_pending()[0]["status"] == "pending"

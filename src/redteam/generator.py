@@ -16,7 +16,8 @@ from anthropic import Anthropic
 from redteam.attacks import Attack, attack_from_dict, load_attacks
 from redteam.config import GENERATOR_MODEL, MAX_ATTACKS_PER_RUN, get_api_key
 from redteam.cost import get_tracker
-from redteam.target.tools import CANARY_FILE_PATH
+from redteam.runner import SETUP_KEYS
+from redteam.target.tools import CANARY_FILE_PATH, CUSTOMER_COLUMNS
 
 # Valid success check types - must match runner._evaluate_check
 VALID_SUCCESS_CHECKS = [
@@ -355,6 +356,44 @@ def _is_valid_path(path: str) -> bool:
         if path.startswith(prefix):
             return True
     return False
+
+
+def _validate_setup_structure(setup: dict[str, Any]) -> list[str]:
+    """Validate setup uses only supported keys and db_rows columns.
+
+    The runner's apply_setup raises on these at run time; checking here keeps a
+    bad attack from ever being approved into the tracked set.
+    """
+    if not isinstance(setup, dict):
+        return [f"setup must be an object, got {type(setup).__name__}"]
+
+    errors: list[str] = []
+    unknown = set(setup) - SETUP_KEYS
+    if unknown:
+        errors.append(
+            f"Unknown setup key(s): {sorted(unknown)}. Supported: {sorted(SETUP_KEYS)}"
+        )
+
+    rows = setup.get("db_rows", [])
+    if rows and not isinstance(rows, list):
+        errors.append(f"db_rows must be a list, got {type(rows).__name__}")
+    else:
+        for row in rows:
+            if not isinstance(row, dict):
+                errors.append(f"db_rows entry must be an object, got {type(row).__name__}")
+                continue
+            unknown_cols = set(row) - set(CUSTOMER_COLUMNS)
+            if unknown_cols:
+                errors.append(
+                    f"Unknown customers column(s): {sorted(unknown_cols)}. "
+                    f"Supported: {sorted(CUSTOMER_COLUMNS)}"
+                )
+    return errors
+
+
+def validate_setup(setup: dict[str, Any]) -> list[str]:
+    """All setup validation: structure (keys/columns) plus domains/paths."""
+    return _validate_setup_structure(setup) + _validate_setup_domains(setup)
 
 
 def _validate_setup_domains(setup: dict[str, Any]) -> list[str]:
@@ -753,13 +792,13 @@ class AttackGenerator:
             self._warn(f"Duplicate task for {attack_id}, skipping")
             return None
 
-        # Validate setup domains and paths
+        # Validate setup structure (keys/columns) plus domains and paths
         setup = data.get("setup", {})
-        domain_errors = _validate_setup_domains(setup)
-        if domain_errors:
-            for err in domain_errors:
+        setup_errors = validate_setup(setup)
+        if setup_errors:
+            for err in setup_errors:
                 self._warn(f"{attack_id}: {err}")
-            self._warn(f"Skipping {attack_id} due to invalid domains/paths")
+            self._warn(f"Skipping {attack_id} due to invalid setup")
             return None
 
         return GeneratedAttack(
@@ -827,6 +866,12 @@ def update_attack_status(attack_id: str, new_status: str, by: str | None = None)
     attacks = load_pending()
     for attack in attacks:
         if attack["id"] == attack_id:
+            if new_status == "approved":
+                setup_errors = validate_setup(attack.get("setup", {}))
+                if setup_errors:
+                    raise ValueError(
+                        f"{attack_id} has invalid setup, cannot approve: {setup_errors}"
+                    )
             attack["status"] = new_status
             if new_status == "approved":
                 attack["approved_by"] = by.strip()

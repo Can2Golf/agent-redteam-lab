@@ -7,15 +7,20 @@ uses remain the ground truth, and the judge stays off.
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 
-from redteam.attacks import load_attacks
+from redteam.attacks import Attack, load_attacks
 from redteam.config import (
     MAX_TOKENS_PER_RESPONSE,
     TARGET_MODEL,
     ProviderConfig,
 )
-from redteam.cost import get_tracker
+from redteam.cost import CostTracker, get_tracker
+from redteam.target.model import ModelProvider
 
 CONFIGS = ("naive", "guarded")
 DEFAULT_REPEATS = 3
@@ -136,3 +141,179 @@ def dry_run_report(repeats: int = DEFAULT_REPEATS) -> str:
     else:
         lines.append("OK: worst case stays within the cap.")
     return "\n".join(lines)
+
+
+# --- Live execution (5b pilot / 5c full run) ---------------------------------
+
+# The 5b pilot: one repeat of these six tasks in each config (5 attacks + 1 benign).
+PILOT_TASK_IDS = ("GEN-001", "GEN-003", "IPI-001", "EVA-001", "MUL-002", "BEN-001")
+
+ProviderFactory = Callable[[str], ModelProvider]
+
+
+def _default_provider_factory(config_name: str) -> ModelProvider:
+    """Build a real AnthropicProvider for a config, at the live temperature."""
+    from redteam.target.anthropic_provider import AnthropicProvider
+
+    cfg = ProviderConfig(temperature=LIVE_TEMPERATURE, dry_run=False)
+    return AnthropicProvider(config=cfg, guarded=(config_name == "guarded"))
+
+
+@dataclass
+class LiveRunOutcome:
+    """One live run's hard-check result plus its measured tokens and cost."""
+
+    attack_id: str
+    name: str
+    category: str
+    config: str
+    repeat: int
+    is_benign: bool
+    success: bool
+    checks_passed: list[str]
+    hijacked: bool
+    exfiltrated: bool
+    turns: int  # API calls this run made
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    saved_to: str = ""
+
+    def one_line(self) -> str:
+        toks = f"turns={self.turns} in={self.input_tokens} out={self.output_tokens}"
+        money = f"${self.cost_usd:.4f}"
+        if self.is_benign:
+            return f"{self.config:7} {self.attack_id:8} BENIGN  completed={self.success}  {toks} {money}"
+        flag = "SUCCESS" if self.success else "blocked"
+        checks = ",".join(self.checks_passed) or "-"
+        return (
+            f"{self.config:7} {self.attack_id:8} {flag:8} "
+            f"hijacked={self.hijacked} exfil={self.exfiltrated} checks={checks} {toks} {money}"
+        )
+
+
+def _save_run(
+    out_dir: Path, result_dict: dict, outcome: LiveRunOutcome
+) -> Path:
+    """Write one run's full record (metadata + transcript) under results/live/."""
+    live_dir = out_dir / "live"
+    live_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
+    fname = f"live_{outcome.config}_{outcome.attack_id}_r{outcome.repeat}_{ts}.json"
+    path = live_dir / fname
+    record = {
+        "attack_id": outcome.attack_id,
+        "name": outcome.name,
+        "category": outcome.category,
+        "config": outcome.config,
+        "repeat": outcome.repeat,
+        "model": TARGET_MODEL,
+        "temperature": LIVE_TEMPERATURE,
+        "max_turns": MAX_TURNS,
+        "timestamp": datetime.now().isoformat(),
+        "success": outcome.success,
+        "checks_passed": outcome.checks_passed,
+        "hijacked": outcome.hijacked,
+        "exfiltrated": outcome.exfiltrated,
+        "turns": outcome.turns,
+        "input_tokens": outcome.input_tokens,
+        "output_tokens": outcome.output_tokens,
+        "cost_usd": outcome.cost_usd,
+        "transcript": result_dict,
+    }
+    path.write_text(json.dumps(record, indent=2))
+    return path
+
+
+def run_one(
+    attack: Attack,
+    config_name: str,
+    repeat: int,
+    out_dir: Path,
+    provider_factory: ProviderFactory,
+    tracker: CostTracker,
+) -> LiveRunOutcome:
+    """Run one attack live in one config, measuring tokens from the cost tracker."""
+    from redteam.runner import AttackRunner, is_benign_category
+
+    model = provider_factory(config_name)
+    before = len(tracker.usage)
+    result = AttackRunner(config_name).run_attack(attack, model=model, max_steps=MAX_TURNS)
+    calls = tracker.usage[before:]
+
+    outcome = LiveRunOutcome(
+        attack_id=attack.id,
+        name=attack.name,
+        category=attack.category,
+        config=config_name,
+        repeat=repeat,
+        is_benign=is_benign_category(attack.category),
+        success=result.success,
+        checks_passed=result.checks_passed,
+        hijacked=result.hijacked,
+        exfiltrated=result.exfiltrated,
+        turns=len(calls),
+        input_tokens=sum(u.input_tokens for u in calls),
+        output_tokens=sum(u.output_tokens for u in calls),
+        cost_usd=sum(u.cost_usd for u in calls),
+    )
+    outcome.saved_to = str(_save_run(out_dir, {"steps": result.transcript}, outcome))
+    return outcome
+
+
+def reestimate_full_run(
+    outcomes: list[LiveRunOutcome], repeats: int = DEFAULT_REPEATS
+) -> str:
+    """Project the full-run cost from measured per-run averages."""
+    plan = build_plan(repeats)
+    n = len(outcomes) or 1
+    avg_in = sum(o.input_tokens for o in outcomes) / n
+    avg_out = sum(o.output_tokens for o in outcomes) / n
+    avg_cost = sum(o.cost_usd for o in outcomes) / n
+    avg_turns = sum(o.turns for o in outcomes) / n
+    projected = avg_cost * plan.num_runs
+    tracker = get_tracker()
+    return "\n".join([
+        "Re-estimated full run from measured pilot averages:",
+        f"  per run: ~{avg_in:.0f} input tok, ~{avg_out:.0f} output tok, "
+        f"~{avg_turns:.1f} turns, ${avg_cost:.4f}",
+        f"  full run ({plan.num_runs} runs): ${projected:.4f}",
+        f"  projected spend after full run: ${tracker.total_cost + projected:.4f} / ${tracker.cap_usd:.2f}",
+    ])
+
+
+def run_pilot(
+    out_dir: str | Path = "results",
+    provider_factory: ProviderFactory | None = None,
+    tracker: CostTracker | None = None,
+) -> list[LiveRunOutcome]:
+    """Run the 5b pilot: 6 tasks x 2 configs x 1 repeat = 12 live runs."""
+    tracker = tracker or get_tracker()
+    provider_factory = provider_factory or _default_provider_factory
+    out_path = Path(out_dir)
+    by_id = {a.id: a for a in load_attacks()}
+    missing = [i for i in PILOT_TASK_IDS if i not in by_id]
+    if missing:
+        raise ValueError(f"Pilot tasks not found: {missing}")
+
+    print("=== LIVE PILOT (Step 5b) — real API calls ===")
+    print(f"Spend so far:     ${tracker.total_cost:.4f}")
+    print(f"Budget cap:       ${tracker.cap_usd:.2f}")
+    print(f"Remaining budget: ${tracker.remaining_budget:.4f}")
+    print(f"Model: {TARGET_MODEL}  Temperature: {LIVE_TEMPERATURE}  Max turns: {MAX_TURNS}")
+    print(f"Runs: {len(PILOT_TASK_IDS)} tasks x {len(CONFIGS)} configs x 1 = {len(PILOT_TASK_IDS) * len(CONFIGS)}\n")
+
+    outcomes: list[LiveRunOutcome] = []
+    for config_name in CONFIGS:
+        for task_id in PILOT_TASK_IDS:
+            outcome = run_one(by_id[task_id], config_name, 1, out_path, provider_factory, tracker)
+            outcomes.append(outcome)
+            print(outcome.one_line())
+
+    total = sum(o.cost_usd for o in outcomes)
+    print(f"\nPilot cost: ${total:.4f}  ({len(outcomes)} runs)")
+    print(f"Spend so far (after pilot): ${tracker.total_cost:.4f} / ${tracker.cap_usd:.2f}")
+    print(f"Transcripts saved under: {out_path / 'live'}")
+    print()
+    print(reestimate_full_run(outcomes))
+    return outcomes

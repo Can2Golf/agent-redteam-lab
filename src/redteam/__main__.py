@@ -23,7 +23,7 @@ from redteam.labeling import (
     run_sampling,
     score_labels,
 )
-from redteam.live import DEFAULT_REPEATS, dry_run_report
+from redteam.live import DEFAULT_REPEATS, dry_run_report, run_pilot
 from redteam.report import generate_report, load_latest_results
 from redteam.runner import AttackRunner, save_results
 
@@ -55,8 +55,11 @@ def cmd_live(args: argparse.Namespace) -> int:
     if args.dry_run:
         print(dry_run_report(repeats=args.repeats))
         return 0
-    # Execution lands in a later step (5b pilot, 5c full run).
-    print("Live execution is not implemented yet; run with --dry-run (Step 5a).")
+    if args.pilot:
+        run_pilot(out_dir=args.output)
+        return 0
+    # Full run (5c) lands in a later step.
+    print("Run with --dry-run (plan) or --pilot (6-task pilot). Full run not implemented yet.")
     return 1
 
 
@@ -351,6 +354,16 @@ def main() -> int:
         type=int,
         default=DEFAULT_REPEATS,
         help=f"Repeats per task per config (default: {DEFAULT_REPEATS})",
+    )
+    live_parser.add_argument(
+        "--pilot",
+        action="store_true",
+        help="Run the 6-task pilot (1 repeat per config) against the real target",
+    )
+    live_parser.add_argument(
+        "--output",
+        default="results",
+        help="Output directory for transcripts (default: results)",
     )
     live_parser.set_defaults(func=cmd_live)
 

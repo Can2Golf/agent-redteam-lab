@@ -55,3 +55,41 @@ def test_dry_run_report_shows_runs_spend_and_no_api_calls() -> None:
     assert "Spend so far:" in report
     assert "Remaining budget:" in report
     assert "Worst-case cost" in report
+
+
+def test_run_pilot_drives_12_runs_and_measures_tokens(tmp_path) -> None:
+    """run_pilot runs 6 tasks x 2 configs, uses the injected factory, no real API."""
+    from pathlib import Path
+
+    from redteam.config import TARGET_MODEL as MODEL
+    from redteam.cost import CostTracker
+    from redteam.live import PILOT_TASK_IDS, run_pilot
+    from redteam.target.model import ModelProvider, ModelResponse
+
+    tracker = CostTracker(_file_path=tmp_path / "cost.json")
+    tracker.usage = []
+
+    class FreeModel(ModelProvider):
+        """Records a fixed, free-ish usage per call, then finishes immediately."""
+
+        def __init__(self, config_name: str) -> None:
+            self.config_name = config_name
+
+        def generate(self, system, messages):  # type: ignore[no-untyped-def]
+            tracker.record(MODEL, input_tokens=100, output_tokens=20)
+            return ModelResponse(thought="done", tool_call=None, final_answer="done")
+
+    outcomes = run_pilot(
+        out_dir=tmp_path,
+        provider_factory=lambda c: FreeModel(c),
+        tracker=tracker,
+    )
+
+    assert len(outcomes) == len(PILOT_TASK_IDS) * 2  # 12 runs
+    assert {o.config for o in outcomes} == {"naive", "guarded"}
+    assert {o.attack_id for o in outcomes} == set(PILOT_TASK_IDS)
+    # Each run made exactly one generate() -> one recorded API call.
+    assert all(o.turns == 1 for o in outcomes)
+    assert all(o.input_tokens == 100 and o.output_tokens == 20 for o in outcomes)
+    # Every run's transcript+metadata was saved under results/live/.
+    assert all(Path(o.saved_to).exists() for o in outcomes)

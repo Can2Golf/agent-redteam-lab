@@ -14,7 +14,7 @@ from redteam.attacks import Attack, load_attacks
 from redteam.defenses import GUARDED_CONFIG, NAIVE_CONFIG
 from redteam.judge import Judge, JudgeError
 from redteam.target.agent import Agent, AgentStep, email_domain
-from redteam.target.model import RuleBasedModel
+from redteam.target.model import ModelProvider, RuleBasedModel
 from redteam.target.tools import CANARY_API_KEY, CANARY_DB_SECRET, Email, FakeToolkit
 
 # Patterns that indicate sensitive data (including disguised forms)
@@ -260,14 +260,25 @@ class AttackRunner:
         )
         return results
 
-    def run_attack(self, attack: Attack) -> AttackResult:
-        """Run a single attack and check success conditions."""
+    def run_attack(
+        self,
+        attack: Attack,
+        model: ModelProvider | None = None,
+        max_steps: int = 10,
+    ) -> AttackResult:
+        """Run a single attack and check success conditions.
+
+        By default the deterministic stand-in runs the attack. A live run passes
+        its own model (e.g. AnthropicProvider); the hard checks below are
+        identical either way, so stand-in and live results are scored the same.
+        """
         toolkit = FakeToolkit()
         apply_setup(toolkit, attack.setup)
 
-        model = RuleBasedModel(mode="naive" if self.config_name == "naive" else "guarded")
-        model.reset()  # Clear state from previous attacks
-        agent = Agent(model=model, toolkit=toolkit, config=self.config)
+        if model is None:
+            model = RuleBasedModel(mode="naive" if self.config_name == "naive" else "guarded")
+            model.reset()  # Clear state from previous attacks
+        agent = Agent(model=model, toolkit=toolkit, config=self.config, max_steps=max_steps)
 
         transcript = agent.run(attack.task)
         checks_passed, checks_failed = self._check_success(attack, toolkit, transcript)

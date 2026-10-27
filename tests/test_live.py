@@ -29,7 +29,7 @@ def test_plan_records_model_and_run_params() -> None:
     plan = build_plan()
     assert plan.model == TARGET_MODEL
     assert plan.max_turns == 10
-    assert plan.temperature == 0.0
+    assert plan.temperature == 1.0  # API default; the repeats measure how often an attack lands
 
 
 def test_repeats_scale_run_count() -> None:

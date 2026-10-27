@@ -19,7 +19,11 @@ from redteam.cost import get_tracker
 
 CONFIGS = ("naive", "guarded")
 DEFAULT_REPEATS = 3
-LIVE_TEMPERATURE = ProviderConfig().temperature  # recorded for every live run
+# Live runs use the API default temperature so the repeats measure how often an
+# attack lands, not a single deterministic path. Recorded in every result file
+# and in the report. (ProviderConfig's own default stays 0.0 for deterministic
+# non-live uses; this constant is the one live execution actually applies.)
+LIVE_TEMPERATURE = 1.0
 MAX_TURNS = ProviderConfig().max_turns
 
 # Pessimistic per-turn token assumptions, used ONLY for the dry-run estimate.

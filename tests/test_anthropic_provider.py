@@ -232,3 +232,37 @@ class TestRetryLogic:
 
         assert response is not None
         assert client.messages.create.call_count == 3
+
+
+class TestCreateKwargsMatchRealSDK:
+    """Guard: every kwarg the provider passes must exist on the real SDK method.
+
+    The mocked-client tests above accept any kwarg, so they could not catch the
+    temperature regression (the installed anthropic SDK's messages.create takes
+    no temperature argument). This test inspects the REAL signature, no network.
+    """
+
+    def test_create_kwargs_are_accepted_by_installed_sdk(self) -> None:
+        import inspect
+
+        from anthropic.resources.messages import Messages
+
+        client = create_mock_client()
+        config = ProviderConfig(dry_run=False)
+        with patch.object(CostTracker, "check_budget"), patch.object(CostTracker, "record"):
+            provider = AnthropicProvider(config=config, client=client)
+            provider.generate("system", [{"role": "user", "content": "hi"}])
+
+        assert client.messages.create.call_count == 1
+        # The provider passes everything by keyword; positional args would dodge this check.
+        assert client.messages.create.call_args.args == ()
+        passed_kwargs = set(client.messages.create.call_args.kwargs)
+
+        real_params = set(inspect.signature(Messages.create).parameters)
+        unknown = passed_kwargs - real_params
+        assert not unknown, (
+            "provider passes kwargs the installed anthropic SDK rejects: "
+            f"{sorted(unknown)}. Real messages.create accepts: {sorted(real_params)}"
+        )
+        # Not vacuous: confirm the core request kwargs really were passed.
+        assert {"model", "max_tokens", "messages", "system", "tools"} <= passed_kwargs

@@ -56,7 +56,7 @@ class Agent:
         messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
         transcript: list[AgentStep] = []
 
-        for _ in range(self.max_steps):
+        for step_index in range(self.max_steps):
             response = self.model.generate("You are a helpful assistant.", messages)
 
             step = AgentStep(
@@ -74,12 +74,25 @@ class Agent:
                 result = self._execute_tool(response.tool_call)
                 step.tool_result = result
 
-                # Add tool result to messages
+                # Record the turn as ONE entry carrying both the assistant's
+                # tool_use and its tool_result, tied by a shared id. The
+                # rule-based stand-in reads only role/content/is_untrusted
+                # (unchanged from before); API providers use the structured
+                # fields to rebuild the exact assistant(tool_use) ->
+                # user(tool_result) message pair the Messages API requires, so
+                # the model sees its own prior calls and never re-issues them.
+                call_id = f"toolu_{step_index}"
                 content = f"Tool {result.tool}: {result.data}"
                 messages.append({
                     "role": "assistant",
                     "content": content,
                     "is_untrusted": result.is_untrusted and self.config.mark_untrusted,
+                    # Structured fields (ignored by the rule-based stand-in):
+                    "tool_use_id": call_id,
+                    "tool_name": response.tool_call.tool,
+                    "tool_input": response.tool_call.args,
+                    "assistant_text": response.thought,
+                    "tool_result_data": str(result.data),
                 })
 
             transcript.append(step)

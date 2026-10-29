@@ -168,27 +168,64 @@ class AnthropicProvider(ModelProvider):
 
         return self._parse_response(response)
 
-    def _build_messages(self, messages: list[dict[str, str]]) -> list[dict[str, Any]]:
-        """Convert internal message format to Anthropic API format."""
+    def _build_messages(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Convert internal message format to Anthropic API format.
+
+        An entry carrying ``tool_use_id`` represents one agent turn: it expands
+        to the assistant message (optional text block + the tool_use block) and
+        the following user message (the matching tool_result block, same id), in
+        that order. This is the structure the Messages API requires so the model
+        sees its own prior tool calls. Plain entries (the user task, or any
+        bare text) map straight across, wrapped in <untrusted> for guarded mode.
+        """
         api_messages: list[dict[str, Any]] = []
 
         for msg in messages:
+            if msg.get("tool_use_id"):
+                api_messages.extend(self._tool_turn_messages(msg))
+                continue
+
             role = msg.get("role", "user")
             content = msg.get("content", "")
-
-            # Wrap untrusted content in delimiters for guarded mode
             if self.guarded and msg.get("is_untrusted", False):
                 content = f"<untrusted>\n{content}\n</untrusted>"
-
-            # Map assistant role for tool results
-            if role == "assistant" and "Tool " in content:
-                # This is a tool result, add as user message
-                api_messages.append({"role": "user", "content": content})
-            else:
-                api_role = "assistant" if role == "assistant" else "user"
-                api_messages.append({"role": api_role, "content": content})
+            api_role = "assistant" if role == "assistant" else "user"
+            api_messages.append({"role": api_role, "content": content})
 
         return api_messages
+
+    def _tool_turn_messages(self, msg: dict[str, Any]) -> list[dict[str, Any]]:
+        """Expand one enriched turn into [assistant(tool_use), user(tool_result)]."""
+        call_id = msg["tool_use_id"]
+
+        assistant_blocks: list[dict[str, Any]] = []
+        text = (msg.get("assistant_text") or "").strip()
+        if text:
+            assistant_blocks.append({"type": "text", "text": text})
+        assistant_blocks.append({
+            "type": "tool_use",
+            "id": call_id,
+            "name": msg["tool_name"],
+            "input": msg.get("tool_input") or {},
+        })
+
+        result_text = str(msg.get("tool_result_data", ""))
+        if self.guarded and msg.get("is_untrusted", False):
+            result_text = f"<untrusted>\n{result_text}\n</untrusted>"
+
+        return [
+            {"role": "assistant", "content": assistant_blocks},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": call_id,
+                        "content": result_text,
+                    }
+                ],
+            },
+        ]
 
     def _call_with_retry(self, system: str, messages: list[dict[str, Any]]) -> Any:
         """Make API call with exponential backoff retry."""

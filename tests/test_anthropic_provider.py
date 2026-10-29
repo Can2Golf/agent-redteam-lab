@@ -234,6 +234,86 @@ class TestRetryLogic:
         assert client.messages.create.call_count == 3
 
 
+def _tool_use_ids(api_messages: list[Any]) -> list[str]:
+    """Ids of every tool_use block across the assistant messages, in order."""
+    ids: list[str] = []
+    for m in api_messages:
+        content = m.get("content")
+        if m.get("role") == "assistant" and isinstance(content, list):
+            ids += [b["id"] for b in content if b.get("type") == "tool_use"]
+    return ids
+
+
+def _tool_result_ids(api_messages: list[Any]) -> list[str]:
+    """tool_use_ids of every tool_result block across the user messages, in order."""
+    ids: list[str] = []
+    for m in api_messages:
+        content = m.get("content")
+        if m.get("role") == "user" and isinstance(content, list):
+            ids += [b["tool_use_id"] for b in content if b.get("type") == "tool_result"]
+    return ids
+
+
+class TestToolUseHistoryStructure:
+    """A multi-turn run must send prior tool_use + matching tool_result each turn.
+
+    This is the regression guard for the agent-loop bug: the old loop dropped the
+    assistant tool_use turn, so the model never saw its own prior calls and
+    re-issued the same call until the turn cap. Here a 3-turn sequence must carry
+    turn 1's tool_use (and its tool_result id) into request 2, and turns 1 AND 2
+    into request 3.
+    """
+
+    def test_three_turn_sequence_preserves_tool_use_and_result_ids(self) -> None:
+        from redteam.target.agent import Agent, AgentConfig
+        from redteam.target.tools import FakeToolkit
+
+        r1 = MockResponse(content=[
+            MockTextBlock(text="reading email"),
+            MockToolUseBlock(name="read_email", input={"index": 0}),
+        ])
+        r2 = MockResponse(content=[
+            MockTextBlock(text="reading config"),
+            MockToolUseBlock(name="read_file", input={"path": "/home/user/config.txt"}),
+        ])
+        r3 = MockResponse(content=[MockTextBlock(text="all done")])
+
+        client = MagicMock()
+        client.messages.create.side_effect = [r1, r2, r3]
+        config = ProviderConfig(dry_run=False)
+
+        with patch.object(CostTracker, "check_budget_for_call"), patch.object(CostTracker, "record"):
+            provider = AnthropicProvider(config=config, client=client)
+            agent = Agent(model=provider, toolkit=FakeToolkit(), config=AgentConfig(), max_steps=5)
+            transcript = agent.run("do the thing")
+
+        assert client.messages.create.call_count == 3
+        assert transcript[-1].final_answer == "all done"  # loop ended on text, not the cap
+
+        req2 = client.messages.create.call_args_list[1].kwargs["messages"]
+        req3 = client.messages.create.call_args_list[2].kwargs["messages"]
+
+        # Request 2 carries turn 1's tool_use and its matching tool_result.
+        assert _tool_use_ids(req2) == ["toolu_0"]
+        assert _tool_result_ids(req2) == ["toolu_0"]
+
+        # Request 3 carries turns 1 AND 2, each tool_use paired with its result.
+        assert _tool_use_ids(req3) == ["toolu_0", "toolu_1"]
+        assert _tool_result_ids(req3) == ["toolu_0", "toolu_1"]
+
+        # The assistant tool_use turn precedes its user tool_result turn, in order.
+        roles = [(m["role"], _blocks_kind(m)) for m in req3]
+        assert ("assistant", "tool_use") in roles
+        assert roles.index(("assistant", "tool_use")) < roles.index(("user", "tool_result"))
+
+
+def _blocks_kind(m: dict[str, Any]) -> str:
+    content = m.get("content")
+    if isinstance(content, list) and content:
+        return content[-1].get("type", "")
+    return "text"
+
+
 class TestCreateKwargsMatchRealSDK:
     """Guard: every kwarg the provider passes must exist on the real SDK method.
 

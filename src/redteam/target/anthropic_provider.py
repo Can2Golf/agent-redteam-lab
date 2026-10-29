@@ -196,10 +196,13 @@ class AnthropicProvider(ModelProvider):
 
         for attempt in range(self.config.max_retries):
             try:
+                # No `temperature`: claude-haiku-5-5 is a thinking-era model and
+                # the installed anthropic SDK's messages.create() takes no
+                # temperature argument (the API rejects non-default sampling).
+                # Runs use the model's default sampling; recorded as "model default".
                 return self.client.messages.create(
                     model=self.config.model,
                     max_tokens=MAX_TOKENS_PER_RESPONSE,
-                    temperature=self.config.temperature,
                     system=system,
                     messages=messages,
                     tools=TOOL_SCHEMAS,

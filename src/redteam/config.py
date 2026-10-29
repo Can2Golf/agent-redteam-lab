@@ -51,7 +51,9 @@ class ProviderConfig:
     timeout: float = REQUEST_TIMEOUT
     max_retries: int = MAX_RETRIES
     dry_run: bool = False
-    temperature: float = 0.0  # Deterministic by default; recorded for every live run
+    # No temperature field: claude-haiku-5-5 / the installed anthropic SDK expose
+    # no temperature control, so the call never sets one and runs use the model
+    # default. See anthropic_provider._call_with_retry and live.LIVE_TEMPERATURE.
 
 
 def get_api_key() -> str:

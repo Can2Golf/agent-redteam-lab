@@ -24,11 +24,12 @@ from redteam.target.model import ModelProvider
 
 CONFIGS = ("naive", "guarded")
 DEFAULT_REPEATS = 3
-# Live runs use the API default temperature so the repeats measure how often an
-# attack lands, not a single deterministic path. Recorded in every result file
-# and in the report. (ProviderConfig's own default stays 0.0 for deterministic
-# non-live uses; this constant is the one live execution actually applies.)
-LIVE_TEMPERATURE = 1.0
+# claude-haiku-5-5 (a thinking-era model) exposes no temperature control: the
+# installed anthropic SDK's messages.create() takes no `temperature` argument,
+# and the API rejects non-default sampling. Live runs therefore use the model's
+# own default sampling, recorded as "model default" in every result file and the
+# report. The 3 repeats still measure run-to-run variation at that default.
+LIVE_TEMPERATURE = "model default"
 MAX_TURNS = ProviderConfig().max_turns
 
 # Pessimistic per-turn token assumptions, used ONLY for the dry-run estimate.
@@ -45,7 +46,7 @@ class LivePlan:
     num_tasks: int
     repeats: int
     model: str
-    temperature: float
+    temperature: str  # "model default" — the model/SDK exposes no temperature control
     max_turns: int
     configs: tuple[str, ...] = CONFIGS
 
@@ -152,10 +153,10 @@ ProviderFactory = Callable[[str], ModelProvider]
 
 
 def _default_provider_factory(config_name: str) -> ModelProvider:
-    """Build a real AnthropicProvider for a config, at the live temperature."""
+    """Build a real AnthropicProvider for a config (model default sampling)."""
     from redteam.target.anthropic_provider import AnthropicProvider
 
-    cfg = ProviderConfig(temperature=LIVE_TEMPERATURE, dry_run=False)
+    cfg = ProviderConfig(dry_run=False)
     return AnthropicProvider(config=cfg, guarded=(config_name == "guarded"))
 
 

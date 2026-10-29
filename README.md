@@ -331,6 +331,15 @@ python -m redteam score
 
 Set `REDTEAM_ANTHROPIC_API_KEY` environment variable. Hard budget cap of $5 USD is enforced via `CostTracker`. Live tests are marked with `@pytest.mark.live` and skipped in CI.
 
+### Live runs against the real target
+
+```bash
+python -m redteam live --dry-run     # Plan + cost estimate, no API calls
+python -m redteam live --pilot        # 6-task pilot (1 repeat per config)
+```
+
+Live runs target `claude-haiku-5-5` with a max of 10 turns per run. **Temperature is recorded as "model default":** this model is a thinking-era model and the installed `anthropic` SDK's `messages.create()` exposes no `temperature` argument, so runs use the model's own default sampling rather than a value we set. The repeats still measure run-to-run variation at that default. Transcripts are saved under `results/live/` (gitignored); the hard checks are identical to the stand-in's.
+
 ## License
 
 MIT

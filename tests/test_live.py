@@ -29,7 +29,8 @@ def test_plan_records_model_and_run_params() -> None:
     plan = build_plan()
     assert plan.model == TARGET_MODEL
     assert plan.max_turns == 10
-    assert plan.temperature == 1.0  # API default; the repeats measure how often an attack lands
+    # The model/SDK exposes no temperature control, so this is recorded as text.
+    assert plan.temperature == "model default"
 
 
 def test_repeats_scale_run_count() -> None:

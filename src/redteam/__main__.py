@@ -23,7 +23,7 @@ from redteam.labeling import (
     run_sampling,
     score_labels,
 )
-from redteam.live import DEFAULT_REPEATS, dry_run_report, run_full, run_pilot
+from redteam.live import DEFAULT_REPEATS, dry_run_report, report_live, run_full, run_pilot
 from redteam.report import generate_report, load_latest_results
 from redteam.runner import AttackRunner, save_results
 
@@ -61,7 +61,10 @@ def cmd_live(args: argparse.Namespace) -> int:
     if args.full:
         run_full(out_dir=args.output, repeats=args.repeats)
         return 0
-    print("Run with --dry-run (plan), --pilot (6-task pilot), or --full (all tasks).")
+    if args.report:
+        print(report_live(out_dir=args.output))
+        return 0
+    print("Run with --dry-run (plan), --pilot, --full (all tasks), or --report.")
     return 1
 
 
@@ -366,6 +369,11 @@ def main() -> int:
         "--full",
         action="store_true",
         help="Run all 36 tasks x both configs x --repeats against the real target (resumable)",
+    )
+    live_parser.add_argument(
+        "--report",
+        action="store_true",
+        help="Summarize finished runs under results/live (reads only, no API)",
     )
     live_parser.add_argument(
         "--output",

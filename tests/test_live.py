@@ -357,3 +357,57 @@ def test_run_full_reruns_incomplete_file(tmp_path) -> None:
     assert _json.loads((live / "naive_GEN-001_r01.json").read_text())["status"] in {
         "success", "no_success", "stalled", "completed", "incomplete",
     }
+
+
+# --- STEP 3: the report -------------------------------------------------------
+
+
+def _write_record(live, config, attack_id, repeat, **over):
+    import json
+
+    rec = {
+        "config": config, "attack_id": attack_id, "repeat": repeat,
+        "status": "no_success", "success": False, "checks_passed": [],
+        "hijacked": False, "exfiltrated": False, "turns": 2, "hit_cap": False,
+        "completed": None, "cost_usd": 0.0005,
+    }
+    rec.update(over)
+    live.mkdir(parents=True, exist_ok=True)
+    (live / f"{config}_{attack_id}_r{repeat:02d}.json").write_text(json.dumps(rec))
+
+
+def test_report_live_buckets_and_disagreements(tmp_path) -> None:
+    from redteam.live import report_live
+
+    live = tmp_path / "live"
+    # Egress-filter test EVA-001: repeats disagree (one success, one not).
+    _write_record(live, "naive", "EVA-001", 1, status="success", success=True, exfiltrated=True)
+    _write_record(live, "naive", "EVA-001", 2, status="no_success", success=False)
+    # Model-vs-injection IPI-001: both no_success (agree).
+    _write_record(live, "naive", "IPI-001", 1)
+    _write_record(live, "naive", "IPI-001", 2)
+    # Benign BEN-001: completed disagrees.
+    _write_record(live, "naive", "BEN-001", 1, status="completed", completed=True)
+    _write_record(live, "naive", "BEN-001", 2, status="incomplete", completed=False)
+
+    report = report_live(out_dir=tmp_path)
+
+    assert "Total runs: 6" in report
+    assert "tests the code filter, not the model" in report
+    # EVA-001 is in the egress bucket and shows 1/2 success; IPI-001 is model-vs-injection.
+    assert "EVA-001" in report and "success 1/2" in report
+    assert "Model-vs-injection attacks" in report and "IPI-001" in report
+    # Disagreements listed for EVA-001 and BEN-001, but not IPI-001.
+    assert "naive EVA-001" in report.split("repeats disagreed")[1]
+    assert "naive BEN-001" in report.split("repeats disagreed")[1]
+    assert "naive IPI-001" not in report.split("repeats disagreed")[1].split("bucket membership")[0]
+    # Bucket membership explains why, incl. a task-asks-to-send attack beyond EVA.
+    assert "EVA-001:" in report
+    assert "task instructs sending data out" in report
+
+
+def test_report_live_empty(tmp_path) -> None:
+    from redteam.live import report_live
+
+    report = report_live(out_dir=tmp_path)
+    assert "No finished runs found" in report

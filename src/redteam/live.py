@@ -102,8 +102,33 @@ def estimate_worst_case(plan: LivePlan) -> CostEstimate:
     return _estimate(plan, plan.max_turns)
 
 
-def dry_run_report(repeats: int = DEFAULT_REPEATS) -> str:
-    """Build the Step 5a dry-run report. Makes no API calls."""
+def _measured_estimate_lines(plan: LivePlan, out_dir: str | Path, tracker: CostTracker) -> list[str]:
+    """Projection from measured per-run averages of finished runs, if any exist."""
+    records = _load_live_records(Path(out_dir) / "live")
+    if not records:
+        return [
+            "",
+            "Measured estimate: no finished runs in results/live yet "
+            "(run the pilot or a partial --full first for a measured projection).",
+        ]
+    n = len(records)
+    avg_cost = sum(r.get("cost_usd", 0.0) for r in records) / n
+    avg_in = sum(r.get("input_tokens", 0) for r in records) / n
+    avg_out = sum(r.get("output_tokens", 0) for r in records) / n
+    avg_turns = sum(r.get("turns", 0) for r in records) / n
+    projected = avg_cost * plan.num_runs
+    return [
+        "",
+        f"Measured averages from {n} finished run(s) in results/live:",
+        f"  per run: ~{avg_in:.0f} input tok, ~{avg_out:.0f} output tok, "
+        f"~{avg_turns:.1f} turns, ${avg_cost:.4f}",
+        f"Estimated cost (measured avg x {plan.num_runs} runs): ${projected:.4f}",
+        f"  projected spend after full run: ${tracker.total_cost + projected:.4f} / ${tracker.cap_usd:.2f}",
+    ]
+
+
+def dry_run_report(repeats: int = DEFAULT_REPEATS, out_dir: str | Path = "results") -> str:
+    """Build the live dry-run report. Makes no API calls."""
     tracker = get_tracker()
     plan = build_plan(repeats)
     pess = estimate_pessimistic(plan)
@@ -139,9 +164,12 @@ def dry_run_report(repeats: int = DEFAULT_REPEATS) -> str:
         f"Projected spend after pessimistic run: ${projected_pess:.4f} / ${tracker.cap_usd:.2f}",
         f"Projected spend after worst case:      ${projected_worst:.4f} / ${tracker.cap_usd:.2f}",
     ]
+    lines.extend(_measured_estimate_lines(plan, out_dir, tracker))
     if projected_worst > tracker.cap_usd:
+        lines.append("")
         lines.append("WARNING: worst case would exceed the cap.")
     else:
+        lines.append("")
         lines.append("OK: worst case stays within the cap.")
     return "\n".join(lines)
 

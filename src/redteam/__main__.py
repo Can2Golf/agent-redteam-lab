@@ -53,7 +53,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_live(args: argparse.Namespace) -> int:
     """Live runs against the real target model."""
     if args.dry_run:
-        print(dry_run_report(repeats=args.repeats))
+        print(dry_run_report(repeats=args.repeats, out_dir=args.output))
         return 0
     if args.pilot:
         run_pilot(out_dir=args.output)

@@ -411,3 +411,22 @@ def test_report_live_empty(tmp_path) -> None:
 
     report = report_live(out_dir=tmp_path)
     assert "No finished runs found" in report
+
+
+# --- STEP 4: dry run with measured averages -----------------------------------
+
+
+def test_dry_run_report_includes_measured_averages_and_720(tmp_path) -> None:
+    from redteam.live import dry_run_report
+
+    live = tmp_path / "live"
+    _write_record(live, "naive", "EVA-001", 1, status="success", success=True,
+                  input_tokens=3000, output_tokens=400, cost_usd=0.0005)
+    _write_record(live, "naive", "IPI-001", 1,
+                  input_tokens=1800, output_tokens=250, cost_usd=0.0003)
+
+    report = dry_run_report(repeats=10, out_dir=tmp_path)
+
+    assert "= 720" in report  # 36 x 2 x 10
+    assert "Measured averages from 2 finished run(s)" in report
+    assert "measured avg x 720 runs" in report

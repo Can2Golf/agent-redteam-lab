@@ -244,15 +244,38 @@ def _benign_completed(success: bool, steps: list[dict]) -> bool:
     return bool(ended_cleanly) and success and not _has_duplicate_sends(steps)
 
 
+# The statuses a finished run can have. A file whose status is not one of these
+# (missing, unknown, or unparseable) is treated as incomplete and is rerun.
+VALID_STATUSES = {"success", "no_success", "stalled", "completed", "incomplete"}
+
+
+def _run_filename(config: str, task_id: str, repeat: int) -> str:
+    """Stable, timestamp-free filename so a rerun can find and skip completed runs."""
+    return f"{config}_{task_id}_r{repeat:02d}.json"
+
+
+def _is_complete(path: Path) -> bool:
+    """True if a prior run already finished here with a valid status.
+
+    A missing file, an unparseable one (an interrupted write), or one without a
+    recognised status is NOT complete, so the run is redone and overwritten.
+    """
+    if not path.exists():
+        return False
+    try:
+        record = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return False
+    return record.get("status") in VALID_STATUSES
+
+
 def _save_run(
     out_dir: Path, result_dict: dict, outcome: LiveRunOutcome
 ) -> Path:
     """Write one run's full record (metadata + transcript) under results/live/."""
     live_dir = out_dir / "live"
     live_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%dT%H%M%S_%f")
-    fname = f"live_{outcome.config}_{outcome.attack_id}_r{outcome.repeat}_{ts}.json"
-    path = live_dir / fname
+    path = live_dir / _run_filename(outcome.config, outcome.attack_id, outcome.repeat)
     record = {
         "attack_id": outcome.attack_id,
         "name": outcome.name,
@@ -428,6 +451,7 @@ def run_full(
     tracker = tracker or get_tracker()
     provider_factory = provider_factory or _default_provider_factory
     out_path = Path(out_dir)
+    live_dir = out_path / "live"
     tasks = load_attacks()  # all 36: 30 attacks + 6 benign, incl. target=="llm" ones
     total = repeats * len(tasks) * len(CONFIGS)
 
@@ -436,10 +460,12 @@ def run_full(
     print(f"Budget cap:       ${tracker.cap_usd:.2f}")
     print(f"Remaining budget: ${tracker.remaining_budget:.4f}")
     print(f"Model: {TARGET_MODEL}  Temperature: {LIVE_TEMPERATURE}  Max turns: {MAX_TURNS}")
-    print(f"Plan: {len(tasks)} tasks x {len(CONFIGS)} configs x {repeats} repeats = {total} runs\n")
+    print(f"Plan: {len(tasks)} tasks x {len(CONFIGS)} configs x {repeats} repeats = {total} runs")
+    print("(Completed runs are skipped on rerun; stable filenames under results/live.)\n")
 
     outcomes: list[LiveRunOutcome] = []
     k = 0
+    skipped = 0
     consecutive_errors = 0
     stopped: str | None = None
 
@@ -447,6 +473,9 @@ def run_full(
         for config_name in CONFIGS:
             for attack in tasks:
                 k += 1
+                if _is_complete(live_dir / _run_filename(config_name, attack.id, repeat)):
+                    skipped += 1
+                    continue
                 try:
                     outcome = run_one(attack, config_name, repeat, out_path, provider_factory, tracker)
                 except BudgetExceededError as e:
@@ -476,9 +505,12 @@ def run_full(
 
     print()
     print(status_summary(outcomes))
-    print(f"\nFinished {len(outcomes)}/{total} runs. Run cost this session so far: ${tracker.total_cost:.4f}")
+    print(
+        f"\nThis session: ran {len(outcomes)}, skipped {skipped} already-complete, "
+        f"of {total} planned."
+    )
     print(f"Spend so far: ${tracker.total_cost:.4f} / ${tracker.cap_usd:.2f}")
-    print(f"Transcripts saved under: {out_path / 'live'}")
+    print(f"Transcripts saved under: {live_dir}")
     if stopped == "budget":
         print("STOPPED: budget cap reached. Rerun the same command to resume the rest.")
     elif stopped == "errors":

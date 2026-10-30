@@ -278,3 +278,82 @@ def test_run_full_stops_cleanly_on_budget(tmp_path, capsys) -> None:
     assert calls["n"] == 1  # budget error stops immediately, not a streak
     out = capsys.readouterr().out
     assert "STOPPED: budget cap reached" in out
+
+
+# --- STEP 2: resumability -----------------------------------------------------
+
+
+def _counting_free_factory(tracker, calls):
+    from redteam.config import TARGET_MODEL as MODEL
+    from redteam.target.model import ModelProvider, ModelResponse
+
+    class FreeModel(ModelProvider):
+        def __init__(self, config_name: str) -> None:
+            pass
+
+        def generate(self, system, messages):  # type: ignore[no-untyped-def]
+            calls["n"] += 1
+            tracker.record(MODEL, input_tokens=100, output_tokens=20)
+            return ModelResponse(thought="done", tool_call=None, final_answer="done")
+
+    return lambda c: FreeModel(c)
+
+
+def test_run_full_resumes_without_repeating_completed(tmp_path) -> None:
+    from redteam.cost import CostTracker
+    from redteam.live import run_full
+
+    tracker = CostTracker(_file_path=tmp_path / "cost.json")
+    tracker.usage = []
+    calls = {"n": 0}
+    factory = _counting_free_factory(tracker, calls)
+    live = tmp_path / "live"
+
+    # First full pass: 72 runs, 72 files, 72 generate calls.
+    run_full(out_dir=tmp_path, repeats=1, provider_factory=factory, tracker=tracker)
+    assert calls["n"] == 72
+    assert len(list(live.glob("*.json"))) == 72
+    cost_after_first = tracker.total_cost
+    assert cost_after_first > 0
+
+    # Rerun with the same args: everything is skipped. No new calls, no new cost.
+    calls["n"] = 0
+    out2 = run_full(out_dir=tmp_path, repeats=1, provider_factory=factory, tracker=tracker)
+    assert calls["n"] == 0
+    assert out2 == []
+    assert tracker.total_cost == cost_after_first
+
+    # Simulate an interruption: drop 10 result files, then resume.
+    import os
+
+    victims = sorted(live.glob("*.json"))[:10]
+    for f in victims:
+        os.remove(f)
+    calls["n"] = 0
+    run_full(out_dir=tmp_path, repeats=1, provider_factory=factory, tracker=tracker)
+    assert calls["n"] == 10  # only the missing runs reran
+    assert len(list(live.glob("*.json"))) == 72  # back to full
+
+
+def test_run_full_reruns_incomplete_file(tmp_path) -> None:
+    from redteam.cost import CostTracker
+    from redteam.live import run_full
+
+    live = tmp_path / "live"
+    live.mkdir(parents=True)
+    # An interrupted/corrupt write and a valid-but-unknown-status file: both rerun.
+    (live / "naive_GEN-001_r01.json").write_text("{ half-written")
+    (live / "naive_GEN-003_r01.json").write_text('{"status": "bogus"}')
+
+    tracker = CostTracker(_file_path=tmp_path / "cost.json")
+    tracker.usage = []
+    calls = {"n": 0}
+    run_full(out_dir=tmp_path, repeats=1, provider_factory=_counting_free_factory(tracker, calls), tracker=tracker)
+
+    # 72 planned, none had a valid status, so all 72 ran and both files were fixed.
+    assert calls["n"] == 72
+    import json as _json
+
+    assert _json.loads((live / "naive_GEN-001_r01.json").read_text())["status"] in {
+        "success", "no_success", "stalled", "completed", "incomplete",
+    }

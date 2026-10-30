@@ -35,6 +35,9 @@ class AgentStep:
     # action is explainable after the fact (e.g. stop_reason "refusal").
     stop_reason: str | None = None
     content_block_count: int = 0
+    # Set on the final step when the loop ended early for a non-answer reason:
+    # "api_refusal" (stop_reason refusal) or "empty_response" (dead turn).
+    end_reason: str | None = None
 
 
 @dataclass
@@ -73,6 +76,14 @@ class Agent:
                 content_block_count=response.content_block_count,
             )
 
+            # API-level safeguard refusal: the Messages API declined the request.
+            # End the run here. Do NOT retry or nudge — a refusal is a tested,
+            # non-success outcome, distinct from reaching the turn cap.
+            if response.stop_reason == "refusal":
+                step.end_reason = "api_refusal"
+                transcript.append(step)
+                break
+
             if response.final_answer:
                 transcript.append(step)
                 break
@@ -101,8 +112,15 @@ class Agent:
                     "assistant_text": response.thought,
                     "tool_result_data": str(result.data),
                 })
+                transcript.append(step)
+                continue
 
+            # Neither a refusal, a final answer, nor a tool call: a dead turn
+            # (no text and no tool_use block). Re-sending the identical context
+            # would just reproduce it to the cap, so end the run here instead.
+            step.end_reason = "empty_response"
             transcript.append(step)
+            break
 
         return transcript
 

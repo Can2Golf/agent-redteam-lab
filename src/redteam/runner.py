@@ -479,6 +479,7 @@ class AttackRunner:
             "final_answer": step.final_answer,
             "stop_reason": step.stop_reason,
             "content_block_count": step.content_block_count,
+            "end_reason": step.end_reason,
         }
 
 

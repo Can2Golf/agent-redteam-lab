@@ -191,6 +191,75 @@ def test_run_one_marks_stalled_attack(tmp_path) -> None:
     assert saved["hit_cap"] is True
 
 
+def _run_one_with_single_response(tmp_path, response):
+    """Run one attack against a model that returns `response` every call.
+
+    Returns (outcome, call_count) so a test can assert the loop ended on the
+    first turn instead of spinning to the max-turn cap.
+    """
+    import json
+    from pathlib import Path
+
+    from redteam.attacks import load_attacks
+    from redteam.config import TARGET_MODEL as MODEL
+    from redteam.cost import CostTracker
+    from redteam.live import run_one
+    from redteam.target.model import ModelProvider
+
+    tracker = CostTracker(_file_path=tmp_path / "cost.json")
+    tracker.usage = []
+    attack = next(a for a in load_attacks() if a.id == "EVA-001")
+    calls = {"n": 0}
+
+    class OneResponseModel(ModelProvider):
+        def __init__(self, config_name: str) -> None:
+            self.config_name = config_name
+
+        def generate(self, system, messages):  # type: ignore[no-untyped-def]
+            calls["n"] += 1
+            tracker.record(MODEL, input_tokens=10, output_tokens=2)
+            return response
+
+    outcome = run_one(attack, "naive", 1, tmp_path, lambda c: OneResponseModel(c), tracker)
+    saved = json.loads(Path(outcome.saved_to).read_text())
+    return outcome, calls["n"], saved
+
+
+def test_run_one_api_refusal_ends_immediately(tmp_path) -> None:
+    """stop_reason 'refusal' -> status api_refusal, one turn, not stalled/hit_cap."""
+    from redteam.target.model import ModelResponse
+
+    refusal = ModelResponse(
+        thought="", tool_call=None, final_answer=None, stop_reason="refusal"
+    )
+    outcome, n_calls, saved = _run_one_with_single_response(tmp_path, refusal)
+
+    assert n_calls == 1  # did NOT loop to the cap
+    assert outcome.status() == "api_refusal"
+    assert outcome.hit_cap is False
+    assert outcome.success is False
+    assert saved["status"] == "api_refusal"
+    assert saved["end_reason"] == "api_refusal"
+    assert saved["hit_cap"] is False
+
+
+def test_run_one_empty_response_ends_immediately(tmp_path) -> None:
+    """A dead turn (no text, no tool) -> status empty_response, one turn, not stalled."""
+    from redteam.target.model import ModelResponse
+
+    empty = ModelResponse(
+        thought="", tool_call=None, final_answer=None, stop_reason="max_tokens"
+    )
+    outcome, n_calls, saved = _run_one_with_single_response(tmp_path, empty)
+
+    assert n_calls == 1  # did NOT loop to the cap
+    assert outcome.status() == "empty_response"
+    assert outcome.hit_cap is False
+    assert saved["status"] == "empty_response"
+    assert saved["end_reason"] == "empty_response"
+    assert saved["hit_cap"] is False
+
+
 # --- STEP 1: the full-run executor --------------------------------------------
 
 

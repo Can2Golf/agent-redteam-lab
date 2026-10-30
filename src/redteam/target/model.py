@@ -19,6 +19,11 @@ class ModelResponse:
     thought: str
     tool_call: ToolCall | None
     final_answer: str | None
+    # API-level diagnostics (real provider only; the stand-in leaves the defaults).
+    # stop_reason is the Messages API stop_reason ("end_turn", "tool_use",
+    # "max_tokens", "refusal", ...); content_block_count is len(response.content).
+    stop_reason: str | None = None
+    content_block_count: int = 0
 
 
 class ModelProvider(ABC):

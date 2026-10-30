@@ -477,6 +477,8 @@ class AttackRunner:
                 "data": str(step.tool_result.data)[:500],
             } if step.tool_result else None,
             "final_answer": step.final_answer,
+            "stop_reason": step.stop_reason,
+            "content_block_count": step.content_block_count,
         }
 
 

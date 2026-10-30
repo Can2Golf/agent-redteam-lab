@@ -45,6 +45,7 @@ class MockUsage:
 class MockResponse:
     content: list[Any] = None
     usage: MockUsage = None
+    stop_reason: str = "end_turn"
 
     def __post_init__(self) -> None:
         if self.content is None:
@@ -135,6 +136,33 @@ class TestResponseParsing:
         assert response.tool_call is not None
         assert response.tool_call.tool == "read_file"
         assert response.tool_call.args["path"] == "/home/user/config.txt"
+
+    def test_parse_captures_stop_reason_and_block_count(self) -> None:
+        # A normal text answer carries stop_reason + the number of content blocks.
+        client = create_mock_client(
+            MockResponse(content=[MockTextBlock(text="Done!")], stop_reason="end_turn")
+        )
+        config = ProviderConfig(dry_run=False)
+        with patch.object(CostTracker, "check_budget"), patch.object(CostTracker, "record"):
+            provider = AnthropicProvider(config=config, client=client)
+            response = provider.generate("system", [{"role": "user", "content": "hi"}])
+        assert response.stop_reason == "end_turn"
+        assert response.content_block_count == 1
+
+    def test_parse_empty_content_is_recorded_not_lost(self) -> None:
+        # The BYP-001 shape: a response with no text and no tool_use block.
+        # It must come back as a no-op step that still records stop_reason and
+        # a content_block_count of 0, so the dead turn is explainable.
+        client = create_mock_client(MockResponse(content=[], stop_reason="max_tokens"))
+        config = ProviderConfig(dry_run=False)
+        with patch.object(CostTracker, "check_budget"), patch.object(CostTracker, "record"):
+            provider = AnthropicProvider(config=config, client=client)
+            response = provider.generate("system", [{"role": "user", "content": "hi"}])
+        assert response.tool_call is None
+        assert response.final_answer is None
+        assert response.thought == ""
+        assert response.stop_reason == "max_tokens"
+        assert response.content_block_count == 0
 
 
 class TestCostTracking:

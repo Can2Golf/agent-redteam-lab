@@ -30,6 +30,11 @@ class AgentStep:
     tool_call: ToolCall | None
     tool_result: ToolResult | None
     final_answer: str | None
+    # API-level diagnostics carried through from the model response (real
+    # provider only). Saved into every result file so a turn that produced no
+    # action is explainable after the fact (e.g. stop_reason "refusal").
+    stop_reason: str | None = None
+    content_block_count: int = 0
 
 
 @dataclass
@@ -64,6 +69,8 @@ class Agent:
                 tool_call=response.tool_call,
                 tool_result=None,
                 final_answer=response.final_answer,
+                stop_reason=response.stop_reason,
+                content_block_count=response.content_block_count,
             )
 
             if response.final_answer:

@@ -273,7 +273,13 @@ class AnthropicProvider(ModelProvider):
             final_answer = thought
             thought = "Providing final answer"
 
-        return ModelResponse(thought=thought, tool_call=tool_call, final_answer=final_answer)
+        return ModelResponse(
+            thought=thought,
+            tool_call=tool_call,
+            final_answer=final_answer,
+            stop_reason=getattr(response, "stop_reason", None),
+            content_block_count=len(response.content),
+        )
 
     def _dry_run_response(
         self, system: str, messages: list[dict[str, Any]]

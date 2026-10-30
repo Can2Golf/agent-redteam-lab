@@ -20,7 +20,7 @@ from redteam.config import (
     TARGET_MODEL,
     ProviderConfig,
 )
-from redteam.cost import CostTracker, get_tracker
+from redteam.cost import BudgetExceededError, CostTracker, get_tracker
 from redteam.target.model import ModelProvider
 
 CONFIGS = ("naive", "guarded")
@@ -405,3 +405,84 @@ def status_summary(outcomes: list[LiveRunOutcome]) -> str:
         f"incomplete={sum(1 for o in benign if not o.completed)}",
         f"  runs that hit the turn cap (any status): {hit_cap_total}",
     ])
+
+
+# Stop the full run after this many API errors in a row (transient outage / bad key).
+MAX_CONSECUTIVE_ERRORS = 5
+
+
+def run_full(
+    out_dir: str | Path = "results",
+    repeats: int = DEFAULT_REPEATS,
+    provider_factory: ProviderFactory | None = None,
+    tracker: CostTracker | None = None,
+) -> list[LiveRunOutcome]:
+    """Run every task in both configs, `repeats` times, against the real target.
+
+    Loop order is repeat-major: repeat 1 covers all tasks in both configs, then
+    repeat 2, and so on, so an interruption still leaves balanced data. Stops
+    cleanly on BudgetExceededError (the provider re-checks the cap before every
+    call) and after MAX_CONSECUTIVE_ERRORS API errors in a row, printing what
+    finished either way.
+    """
+    tracker = tracker or get_tracker()
+    provider_factory = provider_factory or _default_provider_factory
+    out_path = Path(out_dir)
+    tasks = load_attacks()  # all 36: 30 attacks + 6 benign, incl. target=="llm" ones
+    total = repeats * len(tasks) * len(CONFIGS)
+
+    print("=== LIVE FULL RUN (Step 5c) — real API calls ===")
+    print(f"Spend so far:     ${tracker.total_cost:.4f}")
+    print(f"Budget cap:       ${tracker.cap_usd:.2f}")
+    print(f"Remaining budget: ${tracker.remaining_budget:.4f}")
+    print(f"Model: {TARGET_MODEL}  Temperature: {LIVE_TEMPERATURE}  Max turns: {MAX_TURNS}")
+    print(f"Plan: {len(tasks)} tasks x {len(CONFIGS)} configs x {repeats} repeats = {total} runs\n")
+
+    outcomes: list[LiveRunOutcome] = []
+    k = 0
+    consecutive_errors = 0
+    stopped: str | None = None
+
+    for repeat in range(1, repeats + 1):
+        for config_name in CONFIGS:
+            for attack in tasks:
+                k += 1
+                try:
+                    outcome = run_one(attack, config_name, repeat, out_path, provider_factory, tracker)
+                except BudgetExceededError as e:
+                    print(f"  run {k}/{total} {config_name:7} {attack.id:8} STOPPED (budget): {e}")
+                    stopped = "budget"
+                    break
+                except Exception as e:  # noqa: BLE001 - any API/model error counts toward the streak
+                    consecutive_errors += 1
+                    print(
+                        f"  run {k}/{total} {config_name:7} {attack.id:8} "
+                        f"ERROR {consecutive_errors}/{MAX_CONSECUTIVE_ERRORS}: {type(e).__name__}: {e}"
+                    )
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                        stopped = "errors"
+                        break
+                    continue
+                consecutive_errors = 0
+                outcomes.append(outcome)
+                print(
+                    f"  run {k}/{total} r{repeat} {config_name:7} {attack.id:8} "
+                    f"{outcome.status():10} spend ${tracker.total_cost:.4f}"
+                )
+            if stopped:
+                break
+        if stopped:
+            break
+
+    print()
+    print(status_summary(outcomes))
+    print(f"\nFinished {len(outcomes)}/{total} runs. Run cost this session so far: ${tracker.total_cost:.4f}")
+    print(f"Spend so far: ${tracker.total_cost:.4f} / ${tracker.cap_usd:.2f}")
+    print(f"Transcripts saved under: {out_path / 'live'}")
+    if stopped == "budget":
+        print("STOPPED: budget cap reached. Rerun the same command to resume the rest.")
+    elif stopped == "errors":
+        print(f"STOPPED: {MAX_CONSECUTIVE_ERRORS} API errors in a row. Fix the cause and rerun to resume.")
+    else:
+        print("Completed all planned runs.")
+    return outcomes

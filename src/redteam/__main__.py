@@ -23,7 +23,7 @@ from redteam.labeling import (
     run_sampling,
     score_labels,
 )
-from redteam.live import DEFAULT_REPEATS, dry_run_report, run_pilot
+from redteam.live import DEFAULT_REPEATS, dry_run_report, run_full, run_pilot
 from redteam.report import generate_report, load_latest_results
 from redteam.runner import AttackRunner, save_results
 
@@ -58,8 +58,10 @@ def cmd_live(args: argparse.Namespace) -> int:
     if args.pilot:
         run_pilot(out_dir=args.output)
         return 0
-    # Full run (5c) lands in a later step.
-    print("Run with --dry-run (plan) or --pilot (6-task pilot). Full run not implemented yet.")
+    if args.full:
+        run_full(out_dir=args.output, repeats=args.repeats)
+        return 0
+    print("Run with --dry-run (plan), --pilot (6-task pilot), or --full (all tasks).")
     return 1
 
 
@@ -359,6 +361,11 @@ def main() -> int:
         "--pilot",
         action="store_true",
         help="Run the 6-task pilot (1 repeat per config) against the real target",
+    )
+    live_parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Run all 36 tasks x both configs x --repeats against the real target (resumable)",
     )
     live_parser.add_argument(
         "--output",

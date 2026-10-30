@@ -189,3 +189,92 @@ def test_run_one_marks_stalled_attack(tmp_path) -> None:
     saved = json.loads(Path(outcome.saved_to).read_text())
     assert saved["status"] == "stalled"
     assert saved["hit_cap"] is True
+
+
+# --- STEP 1: the full-run executor --------------------------------------------
+
+
+def _free_factory(tracker):
+    """Factory of models that record a fixed free-ish usage and finish at once."""
+    from redteam.config import TARGET_MODEL as MODEL
+    from redteam.target.model import ModelProvider, ModelResponse
+
+    class FreeModel(ModelProvider):
+        def __init__(self, config_name: str) -> None:
+            self.config_name = config_name
+
+        def generate(self, system, messages):  # type: ignore[no-untyped-def]
+            tracker.record(MODEL, input_tokens=100, output_tokens=20)
+            return ModelResponse(thought="done", tool_call=None, final_answer="done")
+
+    return lambda c: FreeModel(c)
+
+
+def test_run_full_covers_all_tasks_both_configs_repeat_major(tmp_path) -> None:
+    from redteam.cost import CostTracker
+    from redteam.live import CONFIGS, run_full
+
+    tracker = CostTracker(_file_path=tmp_path / "cost.json")
+    tracker.usage = []
+
+    outcomes = run_full(out_dir=tmp_path, repeats=2, provider_factory=_free_factory(tracker), tracker=tracker)
+
+    assert len(outcomes) == 36 * 2 * 2  # 144
+    # Repeat-major: the whole first repeat (both configs, all tasks) precedes repeat 2.
+    assert all(o.repeat == 1 for o in outcomes[:72])
+    assert all(o.repeat == 2 for o in outcomes[72:])
+    # Within a repeat, config order is CONFIGS: 36 naive then 36 guarded.
+    assert all(o.config == CONFIGS[0] for o in outcomes[:36])
+    assert all(o.config == CONFIGS[1] for o in outcomes[36:72])
+    # All 36 distinct tasks appear in each repeat.
+    assert len({o.attack_id for o in outcomes}) == 36
+
+
+def test_run_full_stops_after_five_consecutive_errors(tmp_path, capsys) -> None:
+    from redteam.cost import CostTracker
+    from redteam.live import run_full
+    from redteam.target.model import ModelProvider
+
+    calls = {"n": 0}
+
+    class BoomModel(ModelProvider):
+        def __init__(self, config_name: str) -> None:
+            pass
+
+        def generate(self, system, messages):  # type: ignore[no-untyped-def]
+            calls["n"] += 1
+            raise RuntimeError("api exploded")
+
+    tracker = CostTracker(_file_path=tmp_path / "cost.json")
+    tracker.usage = []
+    outcomes = run_full(out_dir=tmp_path, repeats=1, provider_factory=lambda c: BoomModel(c), tracker=tracker)
+
+    assert outcomes == []
+    assert calls["n"] == 5  # stopped after exactly 5 attempts
+    out = capsys.readouterr().out
+    assert "STOPPED" in out and "API errors in a row" in out
+
+
+def test_run_full_stops_cleanly_on_budget(tmp_path, capsys) -> None:
+    from redteam.cost import BudgetExceededError, CostTracker
+    from redteam.live import run_full
+    from redteam.target.model import ModelProvider
+
+    calls = {"n": 0}
+
+    class BrokeModel(ModelProvider):
+        def __init__(self, config_name: str) -> None:
+            pass
+
+        def generate(self, system, messages):  # type: ignore[no-untyped-def]
+            calls["n"] += 1
+            raise BudgetExceededError(current=9.99, cap=5.0)
+
+    tracker = CostTracker(_file_path=tmp_path / "cost.json")
+    tracker.usage = []
+    outcomes = run_full(out_dir=tmp_path, repeats=1, provider_factory=lambda c: BrokeModel(c), tracker=tracker)
+
+    assert outcomes == []
+    assert calls["n"] == 1  # budget error stops immediately, not a streak
+    out = capsys.readouterr().out
+    assert "STOPPED: budget cap reached" in out

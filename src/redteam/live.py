@@ -646,6 +646,44 @@ def _benign_completion_counts(records: list[dict], benign_ids: set[str]) -> dict
     return out
 
 
+def _group_success(records: list[dict], config: str, ids: set[str]) -> tuple[int, int]:
+    """(successes, runs) for the attack ids in `ids` under one config."""
+    runs = [r for r in records if r["config"] == config and r["attack_id"] in ids]
+    return sum(1 for r in runs if r["success"]), len(runs)
+
+
+def _totals_footer(records: list[dict], benign_ids: set[str]) -> list[str]:
+    """Per-config totals with denominators (uses the recomputed records)."""
+    code_ids = _code_defense_ids()
+    inj_ids = {r["attack_id"] for r in records} - benign_ids - code_ids
+    counts = _benign_completion_counts(records, benign_ids)
+    lines = ["", "=== TOTALS (per config, recomputed with current detector) ==="]
+    for config in CONFIGS:
+        attack_runs = [r for r in records if r["config"] == config and r["attack_id"] not in benign_ids]
+        inj_runs = [r for r in attack_runs if r["attack_id"] in inj_ids]
+        inj_succ = sum(1 for r in inj_runs if r["success"])
+        inj_refusal = sum(1 for r in inj_runs if r.get("status") == "api_refusal")
+        av, da, eg = (
+            _group_success(records, config, set(_ARG_VALIDATION)),
+            _group_success(records, config, set(_DOMAIN_ALLOWLIST)),
+            _group_success(records, config, set(_EGRESS_FILTER)),
+        )
+        hij = sum(1 for r in attack_runs if r["hijacked"])
+        exf = sum(1 for r in attack_runs if r["exfiltrated"])
+        done, tot, no5_done, no5_tot = counts[config]
+        lines += [
+            f"{config}:",
+            f"  Injection attack success:   {inj_succ}/{len(inj_runs)}   (api_refusal: {inj_refusal})",
+            f"  Argument validation success: {av[0]}/{av[1]}",
+            f"  Domain allowlist success:    {da[0]}/{da[1]}",
+            f"  Egress filter success:       {eg[0]}/{eg[1]}",
+            f"  Hijacked:                    {hij}/{len(attack_runs)}",
+            f"  Exfiltrated:                 {exf}/{len(attack_runs)}",
+            f"  Benign completion:           {done}/{tot}   (excluding {_BEN_OVERBLOCK_ID}: {no5_done}/{no5_tot})",
+        ]
+    return lines
+
+
 def report_live(out_dir: str | Path = "results") -> str:
     """Build the live-results report from results/live. Reads only; no API, no judge."""
     from redteam.runner import is_benign_category
@@ -720,16 +758,6 @@ def report_live(out_dir: str | Path = "results") -> str:
                     note = f"   <-- {_BEN_OVERBLOCK_NOTE}"
                 emit(attack_id, by_id, config_name, "   ", note)
 
-    # Both benign completion numbers, with and without BEN-005.
-    counts = _benign_completion_counts(records, benign_ids)
-    lines.append("\nBenign completion:")
-    for config_name in CONFIGS:
-        done, tot, no5_done, no5_tot = counts[config_name]
-        lines.append(
-            f"  {config_name:7} {done}/{tot} completed   "
-            f"(excluding {_BEN_OVERBLOCK_ID}: {no5_done}/{no5_tot})"
-        )
-
     lines.append("\nAttacks where repeats disagreed (non-identical outcomes across repeats):")
     lines.extend(disagreements or ["  (none)"])
 
@@ -756,6 +784,7 @@ def report_live(out_dir: str | Path = "results") -> str:
         "task itself requested - it measures the code defense, not model resistance. 'model refused' "
         "is NOT inferred here; read transcripts to classify refusals vs defense blocks."
     )
+    lines.extend(_totals_footer(records, benign_ids))
     return "\n".join(lines)
 
 

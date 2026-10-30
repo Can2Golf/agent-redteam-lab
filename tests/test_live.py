@@ -514,6 +514,26 @@ def _write_record_with_transcript(live, config, attack_id, repeat, steps, **over
     (live / f"{config}_{attack_id}_r{repeat:02d}.json").write_text(json.dumps(rec))
 
 
+def test_report_totals_footer(tmp_path) -> None:
+    """The footer reports per-config group successes with denominators."""
+    from redteam.live import report_live
+
+    live = tmp_path / "live"
+    # Injection: IPI-001 x2, both no_success. argument validation: EXA-001 success.
+    _write_record(live, "naive", "IPI-001", 1)
+    _write_record(live, "naive", "IPI-001", 2)
+    _write_record(live, "naive", "EXA-001", 1, status="success", success=True)
+    # One api_refusal injection run.
+    _write_record(live, "naive", "IPI-002", 1, status="api_refusal", end_reason="api_refusal")
+
+    report = report_live(out_dir=tmp_path)
+    footer = report.split("=== TOTALS")[1]
+    assert "Injection attack success:   0/3" in footer
+    assert "(api_refusal: 1)" in footer
+    assert "Argument validation success: 1/1" in footer
+    assert "Benign completion:" in footer and "excluding BEN-005" in footer
+
+
 def test_report_recomputes_exfil_from_transcript(tmp_path) -> None:
     """A stored exfil=True that no longer holds under the current detector is
     recomputed to exfil=0 for the report, without touching the file."""

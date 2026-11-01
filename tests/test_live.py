@@ -16,13 +16,16 @@ from redteam.live import (
 )
 
 
-def test_plan_is_36_tasks_two_configs_three_repeats() -> None:
+def test_plan_covers_all_tasks_two_configs_three_repeats() -> None:
+    from redteam.attacks import load_attacks
+
+    n = len(load_attacks())
     plan = build_plan(repeats=3)
-    assert plan.num_tasks == 36  # 30 attacks + 6 benign
+    assert plan.num_tasks == n
     assert plan.configs == CONFIGS
     assert plan.num_configs == 2
     assert plan.repeats == 3
-    assert plan.num_runs == 216
+    assert plan.num_runs == n * 2 * 3
 
 
 def test_plan_records_model_and_run_params() -> None:
@@ -34,8 +37,11 @@ def test_plan_records_model_and_run_params() -> None:
 
 
 def test_repeats_scale_run_count() -> None:
-    assert build_plan(repeats=1).num_runs == 72
-    assert build_plan(repeats=3).num_runs == 216
+    from redteam.attacks import load_attacks
+
+    n = len(load_attacks())
+    assert build_plan(repeats=1).num_runs == n * 2
+    assert build_plan(repeats=3).num_runs == n * 2 * 3
 
 
 def test_worst_case_costs_more_than_pessimistic() -> None:
@@ -49,9 +55,12 @@ def test_worst_case_costs_more_than_pessimistic() -> None:
 
 
 def test_dry_run_report_shows_runs_spend_and_no_api_calls() -> None:
+    from redteam.attacks import load_attacks
+
+    n = len(load_attacks())
     report = dry_run_report(repeats=3)
     assert "no API calls made" in report
-    assert "= 216" in report
+    assert f"= {n * 2 * 3}" in report
     assert TARGET_MODEL in report
     assert "Spend so far:" in report
     assert "Remaining budget:" in report
@@ -286,17 +295,20 @@ def test_run_full_covers_all_tasks_both_configs_repeat_major(tmp_path) -> None:
     tracker = CostTracker(_file_path=tmp_path / "cost.json")
     tracker.usage = []
 
+    from redteam.attacks import load_attacks
+
+    n = len(load_attacks())
     outcomes = run_full(out_dir=tmp_path, repeats=2, provider_factory=_free_factory(tracker), tracker=tracker)
 
-    assert len(outcomes) == 36 * 2 * 2  # 144
+    assert len(outcomes) == n * 2 * 2
     # Repeat-major: the whole first repeat (both configs, all tasks) precedes repeat 2.
-    assert all(o.repeat == 1 for o in outcomes[:72])
-    assert all(o.repeat == 2 for o in outcomes[72:])
-    # Within a repeat, config order is CONFIGS: 36 naive then 36 guarded.
-    assert all(o.config == CONFIGS[0] for o in outcomes[:36])
-    assert all(o.config == CONFIGS[1] for o in outcomes[36:72])
-    # All 36 distinct tasks appear in each repeat.
-    assert len({o.attack_id for o in outcomes}) == 36
+    assert all(o.repeat == 1 for o in outcomes[: n * 2])
+    assert all(o.repeat == 2 for o in outcomes[n * 2 :])
+    # Within a repeat, config order is CONFIGS: n naive then n guarded.
+    assert all(o.config == CONFIGS[0] for o in outcomes[:n])
+    assert all(o.config == CONFIGS[1] for o in outcomes[n : n * 2])
+    # All distinct tasks appear in each repeat.
+    assert len({o.attack_id for o in outcomes}) == n
 
 
 def test_run_full_stops_after_five_consecutive_errors(tmp_path, capsys) -> None:
@@ -369,19 +381,22 @@ def _counting_free_factory(tracker, calls):
 
 
 def test_run_full_resumes_without_repeating_completed(tmp_path) -> None:
+    from redteam.attacks import load_attacks
     from redteam.cost import CostTracker
     from redteam.live import run_full
 
+    n = len(load_attacks())
+    full = n * 2  # one repeat, both configs
     tracker = CostTracker(_file_path=tmp_path / "cost.json")
     tracker.usage = []
     calls = {"n": 0}
     factory = _counting_free_factory(tracker, calls)
     live = tmp_path / "live"
 
-    # First full pass: 72 runs, 72 files, 72 generate calls.
+    # First full pass: every run executes, one file + one generate call each.
     run_full(out_dir=tmp_path, repeats=1, provider_factory=factory, tracker=tracker)
-    assert calls["n"] == 72
-    assert len(list(live.glob("*.json"))) == 72
+    assert calls["n"] == full
+    assert len(list(live.glob("*.json"))) == full
     cost_after_first = tracker.total_cost
     assert cost_after_first > 0
 
@@ -401,7 +416,7 @@ def test_run_full_resumes_without_repeating_completed(tmp_path) -> None:
     calls["n"] = 0
     run_full(out_dir=tmp_path, repeats=1, provider_factory=factory, tracker=tracker)
     assert calls["n"] == 10  # only the missing runs reran
-    assert len(list(live.glob("*.json"))) == 72  # back to full
+    assert len(list(live.glob("*.json"))) == full  # back to full
 
 
 def test_run_full_reruns_incomplete_file(tmp_path) -> None:
@@ -414,13 +429,16 @@ def test_run_full_reruns_incomplete_file(tmp_path) -> None:
     (live / "naive_GEN-001_r01.json").write_text("{ half-written")
     (live / "naive_GEN-003_r01.json").write_text('{"status": "bogus"}')
 
+    from redteam.attacks import load_attacks
+
+    full = len(load_attacks()) * 2
     tracker = CostTracker(_file_path=tmp_path / "cost.json")
     tracker.usage = []
     calls = {"n": 0}
     run_full(out_dir=tmp_path, repeats=1, provider_factory=_counting_free_factory(tracker, calls), tracker=tracker)
 
-    # 72 planned, none had a valid status, so all 72 ran and both files were fixed.
-    assert calls["n"] == 72
+    # Every run planned, none had a valid status, so all ran and both files were fixed.
+    assert calls["n"] == full
     import json as _json
 
     assert _json.loads((live / "naive_GEN-001_r01.json").read_text())["status"] in {
@@ -578,8 +596,12 @@ def test_dry_run_report_includes_measured_averages_and_720(tmp_path) -> None:
     _write_record(live, "naive", "IPI-001", 1,
                   input_tokens=1800, output_tokens=250, cost_usd=0.0003)
 
+    from redteam.attacks import load_attacks
+
+    n = len(load_attacks())
     report = dry_run_report(repeats=10, out_dir=tmp_path)
 
-    assert "= 720" in report  # 36 x 2 x 10
+    full = n * 2 * 10
+    assert f"= {full}" in report
     assert "Measured averages from 2 finished run(s)" in report
-    assert "measured avg x 720 runs" in report
+    assert f"measured avg x {full} runs" in report

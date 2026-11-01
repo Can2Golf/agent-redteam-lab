@@ -9,6 +9,7 @@ from pathlib import Path
 from redteam.config import MAX_ATTACKS_PER_RUN
 from redteam.cost import get_tracker
 from redteam.generator import (
+    FOCUS_PROMPTS,
     VALID_CATEGORIES,
     AttackGenerator,
     list_pending_attacks,
@@ -202,11 +203,14 @@ def cmd_generate(args: argparse.Namespace) -> int:
     generator = AttackGenerator(
         dry_run=args.dry_run,
         white_box=args.white_box,
+        focus=args.focus,
     )
 
     if args.dry_run:
         print("DRY RUN: Estimating cost for attack generation...")
         print(f"Mode: {generator.mode}")
+        if args.focus:
+            print(f"Technique focus: {args.focus}")
         est_cost = generator.estimate_cost(args.count)
         print(f"\nEstimated cost: ${est_cost:.4f}")
         print(f"Current spend:  ${tracker.total_cost:.4f}")
@@ -223,6 +227,8 @@ def cmd_generate(args: argparse.Namespace) -> int:
     print(f"Mode: {generator.mode}")
     if args.category:
         print(f"Category focus: {args.category}")
+    if args.focus:
+        print(f"Technique focus: {args.focus}")
     if args.from_attack:
         print(f"Variations of: {args.from_attack}")
     print()
@@ -446,6 +452,11 @@ def main() -> int:
         "--category",
         choices=VALID_CATEGORIES,
         help="Focus on specific category",
+    )
+    generate_parser.add_argument(
+        "--focus",
+        choices=sorted(FOCUS_PROMPTS),
+        help="Append one technique focus to the generator prompt",
     )
     generate_parser.add_argument(
         "--white-box",

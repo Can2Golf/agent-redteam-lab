@@ -11,6 +11,7 @@ import pytest
 from redteam.cost import CostTracker
 from redteam.generator import (
     ATTACK_TOOL,
+    FOCUS_PROMPTS,
     VALID_CATEGORIES,
     VALID_SUCCESS_CHECKS,
     AttackGenerator,
@@ -576,6 +577,74 @@ class TestWhiteBoxMode:
         assert "Known Defenses" not in blackbox.system_prompt
         assert "Known Defenses" in whitebox.system_prompt
         assert "RTLAB-KEY" in whitebox.system_prompt
+
+
+class TestTechniqueFocus:
+    """The --focus option appends one technique line to the generator prompt."""
+
+    def test_all_five_focus_values_are_defined(self) -> None:
+        assert set(FOCUS_PROMPTS) == {
+            "allowed_domain_exfil",
+            "disguised_format",
+            "multi_step",
+            "authority_pretext",
+            "context_burying",
+        }
+
+    def test_unknown_focus_raises(self) -> None:
+        with pytest.raises(ValueError, match="Unknown focus"):
+            AttackGenerator(dry_run=True, focus="not_a_real_focus")
+
+    def test_no_focus_leaves_prompt_without_focus_section(self, tmp_path) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(dry_run=True)
+            prompt = gen._build_prompt(3, None, gen._get_examples())
+        assert "Technique Focus" not in prompt
+
+    @pytest.mark.parametrize("focus", sorted(FOCUS_PROMPTS))
+    def test_focus_appended_to_prompt(self, tmp_path, focus) -> None:
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(dry_run=True, focus=focus)
+            prompt = gen._build_prompt(3, None, gen._get_examples())
+        assert f"Technique Focus: {focus}" in prompt
+        assert FOCUS_PROMPTS[focus] in prompt
+
+    @pytest.mark.parametrize("focus", sorted(FOCUS_PROMPTS))
+    def test_generate_with_each_focus_sends_focus_line(self, tmp_path, focus) -> None:
+        """A mocked client still produces an attack, and the focus line reaches the API."""
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        client = create_mock_client_with_attacks([create_valid_attack_input()])
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(client=client, focus=focus)
+            result = gen.generate(count=1)
+
+        assert len(result.attacks) == 1
+        sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert f"Technique Focus: {focus}" in sent
+        assert FOCUS_PROMPTS[focus] in sent
+
+    def test_focus_composes_with_category_and_keeps_domain_rules(self, tmp_path) -> None:
+        """Focus does not relax validation: a non-fictional domain is still dropped."""
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        bad = create_valid_attack_input(
+            id="GEN-002",
+            task="A unique task whose setup leaks to a real domain",
+            setup={"emails": [{"sender": "a@google.com", "subject": "s", "body": "b"}]},
+        )
+        client = create_mock_client_with_attacks([create_valid_attack_input(), bad])
+
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            gen = AttackGenerator(client=client, focus="allowed_domain_exfil")
+            result = gen.generate(count=2, category="LLM01: Prompt Injection")
+
+        ids = [a.id for a in result.attacks]
+        assert ids == ["GEN-001"]
+        sent = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert "Focus on" in sent  # category focus
+        assert "Technique Focus: allowed_domain_exfil" in sent
 
 
 class TestSetupValidation:

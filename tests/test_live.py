@@ -602,6 +602,9 @@ def test_dry_run_report_includes_measured_averages_and_720(tmp_path) -> None:
     report = dry_run_report(repeats=10, out_dir=tmp_path)
 
     full = n * 2 * 10
-    assert f"= {full}" in report
+    to_run = full - 2  # two runs already complete in this tmp dir are skipped
+    assert f"= {full}" in report              # Total planned
+    assert "Already complete (skipped on resume): 2" in report
+    assert f"To run now: {to_run}" in report
     assert "Measured averages from 2 finished run(s)" in report
-    assert f"measured avg x {full} runs" in report
+    assert f"measured avg x {to_run} runs" in report

@@ -374,7 +374,7 @@ def main() -> int:
     live_parser.add_argument(
         "--full",
         action="store_true",
-        help="Run all 36 tasks x both configs x --repeats against the real target (resumable)",
+        help="Run all tasks x both configs x --repeats against the real target (resumable)",
     )
     live_parser.add_argument(
         "--report",

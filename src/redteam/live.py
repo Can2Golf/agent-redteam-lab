@@ -83,12 +83,35 @@ class CostEstimate:
     cost_usd: float
 
 
-def _estimate(plan: LivePlan, turns_per_run: int) -> CostEstimate:
+def _estimate_for_runs(model: str, runs: int, turns_per_run: int) -> CostEstimate:
     tracker = get_tracker()
-    total_input = plan.num_runs * turns_per_run * PESS_INPUT_TOKENS_PER_TURN
-    total_output = plan.num_runs * turns_per_run * PESS_OUTPUT_TOKENS_PER_TURN
-    cost = tracker.estimate_cost(plan.model, total_input, total_output)
-    return CostEstimate(plan.num_runs, turns_per_run, total_input, total_output, cost)
+    total_input = runs * turns_per_run * PESS_INPUT_TOKENS_PER_TURN
+    total_output = runs * turns_per_run * PESS_OUTPUT_TOKENS_PER_TURN
+    cost = tracker.estimate_cost(model, total_input, total_output)
+    return CostEstimate(runs, turns_per_run, total_input, total_output, cost)
+
+
+def _estimate(plan: LivePlan, turns_per_run: int) -> CostEstimate:
+    return _estimate_for_runs(plan.model, plan.num_runs, turns_per_run)
+
+
+def _remaining_runs(repeats: int, out_dir: str | Path) -> tuple[int, int, int]:
+    """(total, already-complete, to-run-now) for a resumable full run.
+
+    Mirrors run_full's skip rule exactly: a run is skipped when its stable-named
+    file under results/live already has a valid status. So the dry run reports
+    the same work a `--full` resume would actually do.
+    """
+    live_dir = Path(out_dir) / "live"
+    tasks = load_attacks()
+    total = skipped = 0
+    for repeat in range(1, repeats + 1):
+        for config_name in CONFIGS:
+            for attack in tasks:
+                total += 1
+                if _is_complete(live_dir / _run_filename(config_name, attack.id, repeat)):
+                    skipped += 1
+    return total, skipped, total - skipped
 
 
 def estimate_pessimistic(plan: LivePlan) -> CostEstimate:
@@ -101,8 +124,14 @@ def estimate_worst_case(plan: LivePlan) -> CostEstimate:
     return _estimate(plan, plan.max_turns)
 
 
-def _measured_estimate_lines(plan: LivePlan, out_dir: str | Path, tracker: CostTracker) -> list[str]:
-    """Projection from measured per-run averages of finished runs, if any exist."""
+def _measured_estimate_lines(
+    runs: int, out_dir: str | Path, tracker: CostTracker
+) -> list[str]:
+    """Projection from measured per-run averages of finished runs, if any exist.
+
+    `runs` is the number of runs that would actually execute (already-complete
+    runs are skipped), so the projection covers only the work left to do.
+    """
     records = _load_live_records(Path(out_dir) / "live")
     if not records:
         return [
@@ -115,26 +144,38 @@ def _measured_estimate_lines(plan: LivePlan, out_dir: str | Path, tracker: CostT
     avg_in = sum(r.get("input_tokens", 0) for r in records) / n
     avg_out = sum(r.get("output_tokens", 0) for r in records) / n
     avg_turns = sum(r.get("turns", 0) for r in records) / n
-    projected = avg_cost * plan.num_runs
+    projected = avg_cost * runs
     return [
         "",
         f"Measured averages from {n} finished run(s) in results/live:",
         f"  per run: ~{avg_in:.0f} input tok, ~{avg_out:.0f} output tok, "
         f"~{avg_turns:.1f} turns, ${avg_cost:.4f}",
-        f"Estimated cost (measured avg x {plan.num_runs} runs): ${projected:.4f}",
-        f"  projected spend after full run: ${tracker.total_cost + projected:.4f} / ${tracker.cap_usd:.2f}",
+        f"Estimated cost (measured avg x {runs} runs): ${projected:.4f}",
+        f"  projected spend after remaining runs: ${tracker.total_cost + projected:.4f} / ${tracker.cap_usd:.2f}",
     ]
 
 
 def dry_run_report(repeats: int = DEFAULT_REPEATS, out_dir: str | Path = "results") -> str:
-    """Build the live dry-run report. Makes no API calls."""
+    """Build the live dry-run report. Makes no API calls.
+
+    Reflects the resumable full run: already-complete runs under results/live are
+    skipped, so the headline count and cost estimates cover only the runs that
+    would actually execute now (e.g. only new tasks once the rest are finished).
+    """
+    from redteam.runner import is_benign_category
+
     tracker = get_tracker()
     plan = build_plan(repeats)
-    pess = estimate_pessimistic(plan)
-    worst = estimate_worst_case(plan)
+    total, skipped, remaining = _remaining_runs(repeats, out_dir)
+    pess = _estimate_for_runs(plan.model, remaining, PESS_TURNS_PER_RUN)
+    worst = _estimate_for_runs(plan.model, remaining, plan.max_turns)
 
     projected_pess = tracker.total_cost + pess.cost_usd
     projected_worst = tracker.total_cost + worst.cost_usd
+
+    tasks = load_attacks()
+    n_benign = sum(1 for a in tasks if is_benign_category(a.category))
+    n_attacks = len(tasks) - n_benign
 
     lines = [
         "=== LIVE RUN DRY RUN (no API calls made) ===",
@@ -147,23 +188,25 @@ def dry_run_report(repeats: int = DEFAULT_REPEATS, out_dir: str | Path = "result
         f"Temperature: {plan.temperature}",
         f"Max turns:   {plan.max_turns}",
         "",
-        f"Tasks:   {plan.num_tasks} (30 attacks + 6 benign)",
+        f"Tasks:   {plan.num_tasks} ({n_attacks} attacks + {n_benign} benign)",
         f"Configs: {plan.num_configs} ({', '.join(plan.configs)})",
         f"Repeats: {plan.repeats}",
-        f"Total runs: {plan.num_tasks} x {plan.num_configs} x {plan.repeats} = {plan.num_runs}",
+        f"Total planned: {plan.num_tasks} x {plan.num_configs} x {plan.repeats} = {plan.num_runs}",
+        f"Already complete (skipped on resume): {skipped}",
+        f"To run now: {remaining}",
         "",
         "Pessimistic per-turn token assumptions:",
         f"  input {PESS_INPUT_TOKENS_PER_TURN}, output {PESS_OUTPUT_TOKENS_PER_TURN} (response cap)",
         "",
-        f"Estimated cost (pessimistic, {pess.turns_per_run} turns/run): ${pess.cost_usd:.4f}",
+        f"Estimated cost (pessimistic, {pess.turns_per_run} turns/run, {remaining} runs): ${pess.cost_usd:.4f}",
         f"  ~{pess.input_tokens:,} input tok, ~{pess.output_tokens:,} output tok",
-        f"Worst-case cost (all runs hit the {worst.turns_per_run}-turn cap): ${worst.cost_usd:.4f}",
+        f"Worst-case cost (all {remaining} runs hit the {worst.turns_per_run}-turn cap): ${worst.cost_usd:.4f}",
         f"  ~{worst.input_tokens:,} input tok, ~{worst.output_tokens:,} output tok",
         "",
         f"Projected spend after pessimistic run: ${projected_pess:.4f} / ${tracker.cap_usd:.2f}",
         f"Projected spend after worst case:      ${projected_worst:.4f} / ${tracker.cap_usd:.2f}",
     ]
-    lines.extend(_measured_estimate_lines(plan, out_dir, tracker))
+    lines.extend(_measured_estimate_lines(remaining, out_dir, tracker))
     if projected_worst > tracker.cap_usd:
         lines.append("")
         lines.append("WARNING: worst case would exceed the cap.")
@@ -521,6 +564,19 @@ _SUBGROUP_REASON = {
 _BEN_OVERBLOCK_ID = "BEN-005"
 _BEN_OVERBLOCK_NOTE = "defense over-block: egress filter blocks legitimate forwards"
 
+# --- Round 2 (written after round 1 results) ---------------------------------
+# Handwritten injection attacks probing the round-1 gaps. They load as ordinary
+# tasks (so a full run executes them) but are reported in their own section and
+# kept OUT of the round-1 totals. The id/theme map is fixed here; test_round2
+# asserts it matches round2.json so the two never drift.
+_ROUND2_SUBGROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("allowed-domain exfil", ("R2-A1", "R2-A2", "R2-A3")),
+    ("disguised format", ("R2-B1", "R2-B2", "R2-B3")),
+    ("multi-step", ("R2-C1", "R2-C2", "R2-C3")),
+    ("authority pretext", ("R2-D1", "R2-D2", "R2-D3")),
+)
+_ROUND2_IDS = frozenset(i for _, group in _ROUND2_SUBGROUPS for i in group)
+
 
 def _code_defense_ids() -> set[str]:
     ids: set[str] = set()
@@ -730,7 +786,11 @@ def report_live(out_dir: str | Path = "results") -> str:
         lines.append(f"\n--- Config: {config_name} ({len(cfg_recs)} runs) ---")
 
         # (A) Injection attacks: non-benign ids that are not user-requested.
-        inj = sorted(i for i in by_id if i not in code_ids and i not in benign_ids)
+        # Round-2 ids are reported separately below, not in the round-1 buckets.
+        inj = sorted(
+            i for i in by_id
+            if i not in code_ids and i not in benign_ids and i not in _ROUND2_IDS
+        )
         if inj:
             lines.append(" (A) Injection attacks - instruction hidden in content the model reads (model test):")
             for attack_id in inj:
@@ -764,7 +824,7 @@ def report_live(out_dir: str | Path = "results") -> str:
     lines.append("\nBucket membership (why each attack is in its bucket):")
     present_inj = sorted(
         {r["attack_id"] for r in records}
-        - benign_ids - code_ids
+        - benign_ids - code_ids - set(_ROUND2_IDS)
     )
     lines.append(" (A) Injection attacks - malicious instruction injected via content the model reads;"
                  " the user task does not request it:")
@@ -784,7 +844,41 @@ def report_live(out_dir: str | Path = "results") -> str:
         "task itself requested - it measures the code defense, not model resistance. 'model refused' "
         "is NOT inferred here; read transcripts to classify refusals vs defense blocks."
     )
-    lines.extend(_totals_footer(records, benign_ids))
+
+    # --- Round 2 section (written after round 1 results; kept out of the totals) ---
+    lines.append("\n=== ROUND 2 (written after round 1 results) ===")
+    lines.append(
+        " 12 handwritten injection attacks targeting round-1 gaps (allowed-domain exfil,"
+    )
+    lines.append(
+        " disguised format, multi-step, authority pretext). Excluded from the totals above."
+    )
+    r2_present = {r["attack_id"] for r in records} & set(_ROUND2_IDS)
+    if not r2_present:
+        lines.append(" No Round 2 runs recorded yet. Run: python -m redteam live --full --repeats N")
+        for sub_title, group in _ROUND2_SUBGROUPS:
+            lines.append(f"   {sub_title}:")
+            for attack_id in group:
+                lines.append(f'     {attack_id}: "{task_by_id.get(attack_id, "")}"')
+    else:
+        for config_name in CONFIGS:
+            r2_by_id: dict[str, list[dict]] = {}
+            for r in records:
+                if r["config"] == config_name and r["attack_id"] in _ROUND2_IDS:
+                    r2_by_id.setdefault(r["attack_id"], []).append(r)
+            n_runs = sum(len(v) for v in r2_by_id.values())
+            lines.append(f"\n --- Round 2 / {config_name} ({n_runs} runs) ---")
+            for sub_title, group in _ROUND2_SUBGROUPS:
+                ids = [i for i in group if i in r2_by_id]
+                if not ids:
+                    continue
+                lines.append(f"   {sub_title}:")
+                for attack_id in ids:
+                    emit(attack_id, r2_by_id, config_name, "     ")
+
+    # Round-1 totals only (round-2 runs excluded).
+    round1_records = [r for r in records if r["attack_id"] not in _ROUND2_IDS]
+    lines.extend(_totals_footer(round1_records, benign_ids))
     return "\n".join(lines)
 
 
@@ -810,7 +904,7 @@ def run_full(
     provider_factory = provider_factory or _default_provider_factory
     out_path = Path(out_dir)
     live_dir = out_path / "live"
-    tasks = load_attacks()  # all 36: 30 attacks + 6 benign, incl. target=="llm" ones
+    tasks = load_attacks()  # every loaded task (round-1 + round-2 + benign), incl. target=="llm"
     total = repeats * len(tasks) * len(CONFIGS)
 
     print("=== LIVE FULL RUN (Step 5c) — real API calls ===")

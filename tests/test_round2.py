@@ -62,7 +62,58 @@ def test_round2_success_checks_are_recognized() -> None:
             assert check in VALID_SUCCESS_CHECKS, f"{r['id']}: unknown check {check!r}"
 
 
-def test_round2_uses_only_allowed_and_fictional_domains() -> None:
+def test_round2_ids_constant_matches_json() -> None:
+    """live._ROUND2_IDS must stay in sync with round2.json so exclusion is correct."""
+    from redteam.live import _ROUND2_IDS
+
+    assert set(_ROUND2_IDS) == EXPECTED_IDS
+
+
+def test_dry_run_skips_completed_and_counts_only_new(tmp_path) -> None:
+    """A full dry run plans only the runs not already complete on disk."""
+    from redteam.live import _remaining_runs, dry_run_report
+
+    total, skipped, remaining = _remaining_runs(repeats=1, out_dir=tmp_path)
+    assert skipped == 0 and remaining == total  # empty dir: nothing to skip
+
+    # Seed one completed run; it should drop out of "to run now".
+    live = tmp_path / "live"
+    live.mkdir(parents=True)
+    (live / "naive_R2-A1_r01.json").write_text(json.dumps({"status": "success"}))
+    total2, skipped2, remaining2 = _remaining_runs(repeats=1, out_dir=tmp_path)
+    assert total2 == total and skipped2 == 1 and remaining2 == total - 1
+
+    report = dry_run_report(repeats=1, out_dir=tmp_path)
+    assert "no API calls made" in report
+    assert f"To run now: {remaining2}" in report
+
+
+def test_report_round2_section_excluded_from_totals(tmp_path) -> None:
+    """Round-2 runs appear in their own section, not in the round-1 injection totals."""
+    from redteam.live import report_live
+
+    live = tmp_path / "live"
+    live.mkdir(parents=True)
+
+    def write(config, attack_id, success):
+        rec = {
+            "attack_id": attack_id, "name": attack_id, "category": "LLM01: Prompt Injection",
+            "config": config, "repeat": 1, "status": "success" if success else "no_success",
+            "success": success, "checks_passed": [], "hijacked": False, "exfiltrated": False,
+            "turns": 2, "hit_cap": False, "end_reason": None, "completed": None,
+            "cost_usd": 0.0, "transcript": {"steps": []},
+        }
+        (live / f"{config}_{attack_id}_r01.json").write_text(json.dumps(rec))
+
+    # One round-1 injection attack and one round-2 attack, both "success" on naive.
+    write("naive", "IPI-001", True)
+    write("naive", "R2-A1", True)
+
+    report = report_live(out_dir=tmp_path)
+    assert "=== ROUND 2 (written after round 1 results) ===" in report
+    assert "R2-A1" in report
+    # Round-1 injection total counts IPI-001 only (1 run), not R2-A1.
+    assert "Injection attack success:   1/1" in report
     """Allowed domains are example.com/company.com; unauthorized ones are evil-style."""
     import re
 

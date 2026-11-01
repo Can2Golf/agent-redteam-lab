@@ -413,6 +413,22 @@ def validate_setup(setup: dict[str, Any]) -> list[str]:
     return _validate_setup_structure(setup) + _validate_setup_domains(setup)
 
 
+def _summarize_content_blocks(content: Any) -> list[dict[str, Any]]:
+    """Summarize response content blocks as {type, text?} for logging.
+
+    text is included only for blocks that carry it (e.g. text blocks), so a
+    refusal's returned blocks are visible in the generation log.
+    """
+    blocks: list[dict[str, Any]] = []
+    for block in content or []:
+        entry: dict[str, Any] = {"type": getattr(block, "type", None)}
+        text = getattr(block, "text", None)
+        if text is not None:
+            entry["text"] = text
+        blocks.append(entry)
+    return blocks
+
+
 def _validate_setup_domains(setup: dict[str, Any]) -> list[str]:
     """Validate all domains in setup are fictional. Returns list of errors."""
     errors = []
@@ -479,17 +495,24 @@ class AttackGenerator:
 
     def _log_run(
         self, requested: int, returned: int, refusal_count: int, stop_reason: str | None,
-        error: str | None = None,
+        error: str | None = None, content_blocks: list[dict[str, Any]] | None = None,
     ) -> None:
-        """Append this run's outcome and validation warnings to the generation log."""
+        """Append this run's outcome and validation warnings to the generation log.
+
+        focus and white_box are recorded on every entry (focus null when unused).
+        content_blocks is populated for refusals so the returned blocks are visible.
+        """
         entry = {
             "timestamp": datetime.now().isoformat(),
             "model": self.model,
             "mode": self.mode,
+            "focus": self.focus,
+            "white_box": self.white_box,
             "requested": requested,
             "returned": returned,
             "refusal_count": refusal_count,
             "stop_reason": stop_reason,
+            "content_blocks": content_blocks,
             "warnings": self._warnings,
             "error": error,
         }
@@ -596,7 +619,10 @@ class AttackGenerator:
         refusal_count = 0
         if response.stop_reason == "refusal":
             refusal_count = 1
-            self._log_run(count, 0, refusal_count, response.stop_reason)
+            self._log_run(
+                count, 0, refusal_count, response.stop_reason,
+                content_blocks=_summarize_content_blocks(response.content),
+            )
             return GenerationResult(
                 attacks=[],
                 refusal_count=refusal_count,

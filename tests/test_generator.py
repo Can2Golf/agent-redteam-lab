@@ -503,6 +503,61 @@ class TestGenerationLog:
                 AttackGenerator(client=create_mock_client_no_tools()).generate(count=1)
         assert "No valid attacks" in isolated_generation_log.read_text()
 
+    def test_log_records_focus_and_white_box(self, tmp_path, isolated_generation_log) -> None:
+        import json
+
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        client = create_mock_client_with_attacks([create_valid_attack_input()])
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            AttackGenerator(client=client, white_box=True, focus="multi_step").generate(count=1)
+
+        entry = json.loads(isolated_generation_log.read_text().splitlines()[-1])
+        assert entry["focus"] == "multi_step"
+        assert entry["white_box"] is True
+        assert entry["content_blocks"] is None  # not a refusal
+
+    def test_log_focus_null_when_unused(self, tmp_path, isolated_generation_log) -> None:
+        import json
+
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        client = create_mock_client_with_attacks([create_valid_attack_input()])
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            AttackGenerator(client=client).generate(count=1)
+
+        entry = json.loads(isolated_generation_log.read_text().splitlines()[-1])
+        assert entry["focus"] is None
+        assert entry["white_box"] is False
+
+    def test_refusal_logs_content_blocks_with_text(self, tmp_path, isolated_generation_log) -> None:
+        import json
+
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        client = MagicMock()
+        client.messages.create.return_value = MockResponse(
+            content=[MockTextBlock(text="I can't help with that.")],
+            stop_reason="refusal",
+        )
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            result = AttackGenerator(client=client, white_box=True, focus="authority_pretext").generate(count=1)
+
+        assert result.refusal_count == 1
+        entry = json.loads(isolated_generation_log.read_text().splitlines()[-1])
+        assert entry["stop_reason"] == "refusal"
+        assert entry["focus"] == "authority_pretext"
+        assert entry["white_box"] is True
+        assert entry["content_blocks"] == [{"type": "text", "text": "I can't help with that."}]
+
+    def test_refusal_with_empty_content_logs_empty_list(self, tmp_path, isolated_generation_log) -> None:
+        import json
+
+        tracker = CostTracker(cap_usd=10.0, _file_path=tmp_path / "cost.json")
+        with patch("redteam.generator.get_tracker", return_value=tracker):
+            AttackGenerator(client=create_mock_client_refusal()).generate(count=1)
+
+        entry = json.loads(isolated_generation_log.read_text().splitlines()[-1])
+        assert entry["stop_reason"] == "refusal"
+        assert entry["content_blocks"] == []
+
 
 class TestCostTracking:
     """Test that generator uses cost tracker correctly."""

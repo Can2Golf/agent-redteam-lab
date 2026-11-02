@@ -36,3 +36,4 @@ labels/labeling.first-pass-backup.csv
 
 # Generated attacks - pending review
 src/redteam/attacks/generated/
+.claude/settings.local.json
